@@ -79,6 +79,10 @@ function selectServiceAccountFields(value: unknown): unknown {
 }
 
 function parseServiceAccountKey(config: WorkerConfig): ServiceAccountKey {
+  if (config.GCP_SERVICE_ACCOUNT_JSON_B64 === undefined) {
+    throw new Error('Cloud Run ID token mode requires GCP_SERVICE_ACCOUNT_JSON_B64.');
+  }
+
   return serviceAccountKeySchema.parse(
     selectServiceAccountFields(decodeBase64Json(config.GCP_SERVICE_ACCOUNT_JSON_B64)),
   );

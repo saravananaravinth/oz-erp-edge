@@ -8,9 +8,6 @@ routes = [
   { pattern = "api.erp.ozotecev.com/*", zone_name = "ozotecev.com" }
 ]
 
-[placement]
-region = "gcp:asia-south1"
-
 [observability]
 enabled = true
 

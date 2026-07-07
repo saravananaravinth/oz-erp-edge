@@ -20,12 +20,27 @@ export type WorkerEnv = Readonly<{
   FETCH_TIMEOUT_MS?: string;
   CLOUD_RUN_BASE_URL?: string;
   CLOUD_RUN_AUDIENCE?: string;
+  CLOUD_RUN_AUTH_MODE?: string;
   GOOGLE_TOKEN_URI?: string;
   GOOGLE_TOKEN_CACHE_SKEW_SECONDS?: string;
   GCP_SERVICE_ACCOUNT_JSON_B64?: string;
 }>;
 
+export type CloudRunAuthMode = 'auto' | 'disabled' | 'id_token';
+export type ResolvedCloudRunAuthMode = Exclude<CloudRunAuthMode, 'auto'>;
+
+type CloudRunAuthConfig = Readonly<{
+  CLOUD_RUN_AUTH_MODE: CloudRunAuthMode;
+  CLOUD_RUN_BASE_URL: string;
+}>;
+
+const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+const PRODUCTION_APP_ENV = 'production';
+
 const requiredTrimmedString = z.string().trim().min(1);
+
+const cloudRunAuthModeSchema = z.enum(['auto', 'disabled', 'id_token']).default('auto');
+
 const booleanFromEnv = (defaultValue: boolean) =>
   z.preprocess((value) => {
     if (value === undefined || value === '') {
@@ -80,14 +95,37 @@ const integerFromEnv = (options: {
     return Number(trimmed);
   }, z.number().int().min(options.min).max(options.max).default(options.defaultValue));
 
-const isHttpUrl = (value: string): boolean => {
+function safeParseUrl(value: string): URL | null {
   try {
-    const url = new URL(value);
-    return url.protocol === 'https:' || url.protocol === 'http:';
+    return new URL(value);
   } catch {
+    return null;
+  }
+}
+
+function isLocalhostHostname(hostname: string): boolean {
+  return LOCALHOST_HOSTNAMES.has(hostname.toLowerCase());
+}
+
+function isHttpUrl(value: string): boolean {
+  const url = safeParseUrl(value);
+
+  if (url === null) {
     return false;
   }
-};
+
+  return url.protocol === 'https:' || url.protocol === 'http:';
+}
+
+function isLocalHttpBackend(value: string): boolean {
+  const url = safeParseUrl(value);
+
+  if (url === null) {
+    return false;
+  }
+
+  return url.protocol === 'http:' && isLocalhostHostname(url.hostname);
+}
 
 const httpUrlString = requiredTrimmedString.refine(isHttpUrl, {
   message: 'Must be a valid http(s) URL.',
@@ -146,18 +184,20 @@ const pathCsvList = (defaultValue: string) =>
     }
   });
 
-const methodCsvList = csvList('GET,POST,PUT,PATCH,DELETE,OPTIONS').superRefine((items, context) => {
-  const allowedMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+const methodCsvList = csvList('GET,POST,PUT,PATCH,DELETE,OPTIONS').superRefine(
+  (items, context) => {
+    const allowedMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 
-  for (const item of items) {
-    if (!allowedMethods.has(item)) {
-      context.addIssue({
-        code: 'custom',
-        message: `Unsupported HTTP method "${item}".`,
-      });
+    for (const item of items) {
+      if (!allowedMethods.has(item)) {
+        context.addIssue({
+          code: 'custom',
+          message: `Unsupported HTTP method "${item}".`,
+        });
+      }
     }
-  }
-});
+  },
+);
 
 const createHeaderNameCsvList = (defaultValue: string) =>
   csvList(defaultValue).superRefine((items, context) => {
@@ -223,13 +263,17 @@ const rawConfigSchema = z
     FETCH_TIMEOUT_MS: integerFromEnv({ min: 1_000, max: 120_000, defaultValue: 115_000 }),
     CLOUD_RUN_BASE_URL: httpUrlString,
     CLOUD_RUN_AUDIENCE: httpUrlString,
+    CLOUD_RUN_AUTH_MODE: cloudRunAuthModeSchema,
     GOOGLE_TOKEN_URI: httpUrlString.default('https://oauth2.googleapis.com/token'),
     GOOGLE_TOKEN_CACHE_SKEW_SECONDS: integerFromEnv({ min: 30, max: 600, defaultValue: 120 }),
-    GCP_SERVICE_ACCOUNT_JSON_B64: serviceAccountJsonB64Schema,
+    GCP_SERVICE_ACCOUNT_JSON_B64: serviceAccountJsonB64Schema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.APP_ENV === 'production' && value.ALLOWED_ORIGINS.includes('*')) {
+    const resolvedCloudRunAuthMode = resolveCloudRunAuthMode(value);
+    const cloudRunBaseUrl = safeParseUrl(value.CLOUD_RUN_BASE_URL);
+
+    if (value.APP_ENV === PRODUCTION_APP_ENV && value.ALLOWED_ORIGINS.includes('*')) {
       context.addIssue({
         code: 'custom',
         path: ['ALLOWED_ORIGINS'],
@@ -242,6 +286,48 @@ const rawConfigSchema = z
         code: 'custom',
         path: ['ALLOWED_ORIGINS'],
         message: 'Wildcard CORS origins cannot be used when credentials are allowed.',
+      });
+    }
+
+    if (value.CLOUD_RUN_AUTH_MODE === 'disabled' && !isLocalHttpBackend(value.CLOUD_RUN_BASE_URL)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['CLOUD_RUN_AUTH_MODE'],
+        message: 'Cloud Run auth can be disabled only for localhost HTTP backend development.',
+      });
+    }
+
+    if (value.APP_ENV === PRODUCTION_APP_ENV) {
+      if (cloudRunBaseUrl?.protocol !== 'https:') {
+        context.addIssue({
+          code: 'custom',
+          path: ['CLOUD_RUN_BASE_URL'],
+          message: 'Production Cloud Run base URL must use HTTPS.',
+        });
+      }
+
+      if (isLocalhostHostname(cloudRunBaseUrl?.hostname ?? '')) {
+        context.addIssue({
+          code: 'custom',
+          path: ['CLOUD_RUN_BASE_URL'],
+          message: 'Production Cloud Run base URL must not target localhost.',
+        });
+      }
+
+      if (resolvedCloudRunAuthMode === 'disabled') {
+        context.addIssue({
+          code: 'custom',
+          path: ['CLOUD_RUN_AUTH_MODE'],
+          message: 'Cloud Run auth cannot be disabled in production.',
+        });
+      }
+    }
+
+    if (resolvedCloudRunAuthMode === 'id_token' && value.GCP_SERVICE_ACCOUNT_JSON_B64 === undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['GCP_SERVICE_ACCOUNT_JSON_B64'],
+        message: 'Service account JSON is required when Cloud Run auth mode resolves to id_token.',
       });
     }
   });
@@ -268,6 +354,7 @@ export function parseWorkerConfig(env: WorkerEnv): WorkerConfig {
     FETCH_TIMEOUT_MS: env.FETCH_TIMEOUT_MS,
     CLOUD_RUN_BASE_URL: env.CLOUD_RUN_BASE_URL,
     CLOUD_RUN_AUDIENCE: env.CLOUD_RUN_AUDIENCE,
+    CLOUD_RUN_AUTH_MODE: env.CLOUD_RUN_AUTH_MODE,
     GOOGLE_TOKEN_URI: env.GOOGLE_TOKEN_URI,
     GOOGLE_TOKEN_CACHE_SKEW_SECONDS: env.GOOGLE_TOKEN_CACHE_SKEW_SECONDS,
     GCP_SERVICE_ACCOUNT_JSON_B64: env.GCP_SERVICE_ACCOUNT_JSON_B64,
@@ -276,4 +363,16 @@ export function parseWorkerConfig(env: WorkerEnv): WorkerConfig {
 
 export function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/u, '');
+}
+
+export function resolveCloudRunAuthMode(config: CloudRunAuthConfig): ResolvedCloudRunAuthMode {
+  if (config.CLOUD_RUN_AUTH_MODE !== 'auto') {
+    return config.CLOUD_RUN_AUTH_MODE;
+  }
+
+  return isLocalHttpBackend(config.CLOUD_RUN_BASE_URL) ? 'disabled' : 'id_token';
+}
+
+export function shouldUseCloudRunIdToken(config: CloudRunAuthConfig): boolean {
+  return resolveCloudRunAuthMode(config) === 'id_token';
 }

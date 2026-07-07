@@ -5,7 +5,7 @@ import type { WorkerConfig } from '../src/config.js';
 import { resolveBackendPath } from '../src/proxy.js';
 
 const config: WorkerConfig = {
-  APP_ENV: 'test' as never,
+  APP_ENV: 'development',
   APP_NAME: 'oz-erp-edge-worker',
   APP_VERSION: 'test',
   PUBLIC_API_PREFIX: '',
@@ -21,11 +21,11 @@ const config: WorkerConfig = {
   REQUIRE_ORIGIN_ON_MUTATION: true,
   MAX_BODY_BYTES: 1_048_576,
   FETCH_TIMEOUT_MS: 115_000,
-  CLOUD_RUN_BASE_URL: 'https://oz-erp-api.example.run.app',
-  CLOUD_RUN_AUDIENCE: 'https://oz-erp-api.example.run.app',
+  CLOUD_RUN_BASE_URL: 'http://localhost:8080',
+  CLOUD_RUN_AUDIENCE: 'http://localhost:8080',
+  CLOUD_RUN_AUTH_MODE: 'auto',
   GOOGLE_TOKEN_URI: 'https://oauth2.googleapis.com/token',
   GOOGLE_TOKEN_CACHE_SKEW_SECONDS: 120,
-  GCP_SERVICE_ACCOUNT_JSON_B64: 'unused-but-required-by-type',
 };
 
 describe('resolveBackendPath', () => {
@@ -37,6 +37,11 @@ describe('resolveBackendPath', () => {
 
   it('does not expose backend tasks through the frontend gateway', () => {
     expect(resolveBackendPath('/tasks/notification.send', config)).toBeNull();
+  });
+
+  it('does not expose backend health through the frontend gateway', () => {
+    expect(resolveBackendPath('/erp/readyz', config)).toBe('/erp/readyz');
+    expect(resolveBackendPath('/readyz', config)).toBeNull();
   });
 
   it('does not expose paths outside allowed ERP prefixes', () => {

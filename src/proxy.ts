@@ -2,7 +2,7 @@
 import type { Context } from 'hono';
 
 import type { WorkerConfig, WorkerEnv } from './config.js';
-import { normalizeBaseUrl } from './config.js';
+import { normalizeBaseUrl, shouldUseCloudRunIdToken } from './config.js';
 import { getCloudRunIdToken } from './gcp-id-token.js';
 import { problemJson } from './problem.js';
 import type { RequestContext } from './request-context.js';
@@ -186,9 +186,15 @@ function getClientIp(request: Request): string | null {
   return trimmed.length > 0 && trimmed.length <= 128 ? trimmed : null;
 }
 
+function resolveForwardedProto(request: Request): 'http' | 'https' {
+  const protocol = new URL(request.url).protocol;
+
+  return protocol === 'http:' ? 'http' : 'https';
+}
+
 function buildBackendHeaders(
   request: Request,
-  token: string,
+  token: string | null,
   requestContext: RequestContext,
 ): Headers {
   const headers = new Headers();
@@ -207,10 +213,13 @@ function buildBackendHeaders(
     headers.set(name, value);
   });
 
-  headers.set('x-serverless-authorization', `Bearer ${token}`);
+  if (token !== null) {
+    headers.set('x-serverless-authorization', `Bearer ${token}`);
+  }
+
   headers.set('x-request-id', requestContext.requestId);
   headers.set('x-correlation-id', requestContext.correlationId);
-  headers.set('x-forwarded-proto', 'https');
+  headers.set('x-forwarded-proto', resolveForwardedProto(request));
   headers.set('x-oz-edge-gateway', 'cloudflare-worker');
 
   const clientIp = getClientIp(request);
@@ -263,6 +272,27 @@ function sanitizeBackendResponse(response: Response, requestContext: RequestCont
   });
 }
 
+async function resolveBackendInvocationToken(
+  config: WorkerConfig,
+  requestContext: RequestContext,
+): Promise<Response | string | null> {
+  if (!shouldUseCloudRunIdToken(config)) {
+    return null;
+  }
+
+  try {
+    return await getCloudRunIdToken(config);
+  } catch {
+    return problemJson({
+      status: 503,
+      code: 'EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE',
+      title: 'Service Unavailable',
+      detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
+      requestId: requestContext.requestId,
+    });
+  }
+}
+
 export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
   const requestContext = context.get('requestContext');
   const config = context.get('workerConfig');
@@ -305,23 +335,15 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
     });
   }
 
-  let token: string;
+  const tokenResult = await resolveBackendInvocationToken(config, requestContext);
 
-  try {
-    token = await getCloudRunIdToken(config);
-  } catch {
-    return problemJson({
-      status: 503,
-      code: 'EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE',
-      title: 'Service Unavailable',
-      detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
-      requestId: requestContext.requestId,
-    });
+  if (tokenResult instanceof Response) {
+    return tokenResult;
   }
 
   const backendRequest = new Request(buildBackendUrl(request, backendPath, config), {
     method: request.method,
-    headers: buildBackendHeaders(request, token, requestContext),
+    headers: buildBackendHeaders(request, tokenResult, requestContext),
     body: METHODS_WITHOUT_BODY.has(method) ? null : request.body,
     redirect: 'manual',
   });

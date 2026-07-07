@@ -2,7 +2,7 @@
 import type { Context } from 'hono';
 
 import type { WorkerConfig, WorkerEnv } from './config.js';
-import { normalizeBaseUrl } from './config.js';
+import { normalizeBaseUrl, resolveCloudRunAuthMode, shouldUseCloudRunIdToken } from './config.js';
 import { getCloudRunIdToken } from './gcp-id-token.js';
 import { problemJson } from './problem.js';
 import type { RequestContext } from './request-context.js';
@@ -34,6 +34,7 @@ export function livez(context: HonoContext): Response {
         status: 'alive',
         version: config.APP_VERSION,
         environment: config.APP_ENV,
+        cloud_run_auth_mode: resolveCloudRunAuthMode(config),
         timestamp: new Date().toISOString(),
       },
       request_id: requestContext.requestId,
@@ -46,32 +47,42 @@ export function livez(context: HonoContext): Response {
   );
 }
 
+function buildReadyzHeaders(requestContext: RequestContext): Headers {
+  const headers = new Headers();
+  headers.set('accept', 'application/json');
+  headers.set('x-request-id', requestContext.requestId);
+  headers.set('x-correlation-id', requestContext.correlationId);
+
+  return headers;
+}
+
 export async function readyz(context: HonoContext): Promise<Response> {
   const config = context.get('workerConfig');
   const requestContext = context.get('requestContext');
-  let token: string;
+  const backendHeaders = buildReadyzHeaders(requestContext);
 
-  try {
-    token = await getCloudRunIdToken(config);
-  } catch {
-    return problemJson({
-      status: 503,
-      code: 'EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE',
-      title: 'Service Unavailable',
-      detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
-      requestId: requestContext.requestId,
-    });
+  if (shouldUseCloudRunIdToken(config)) {
+    let token: string;
+
+    try {
+      token = await getCloudRunIdToken(config);
+    } catch {
+      return problemJson({
+        status: 503,
+        code: 'EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE',
+        title: 'Service Unavailable',
+        detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
+        requestId: requestContext.requestId,
+      });
+    }
+
+    backendHeaders.set('x-serverless-authorization', `Bearer ${token}`);
   }
 
   const backendReadyUrl = `${normalizeBaseUrl(config.CLOUD_RUN_BASE_URL)}/readyz`;
   const response = await fetch(backendReadyUrl, {
     method: 'GET',
-    headers: {
-      accept: 'application/json',
-      'x-serverless-authorization': `Bearer ${token}`,
-      'x-request-id': requestContext.requestId,
-      'x-correlation-id': requestContext.correlationId,
-    },
+    headers: backendHeaders,
   });
   const headers = applySecurityHeaders(new Headers());
   headers.set('content-type', 'application/json; charset=utf-8');
@@ -85,6 +96,7 @@ export async function readyz(context: HonoContext): Promise<Response> {
         service: config.APP_NAME,
         status: response.ok ? 'ready' : 'not_ready',
         backend_status: response.status,
+        cloud_run_auth_mode: resolveCloudRunAuthMode(config),
         timestamp: new Date().toISOString(),
       },
       request_id: requestContext.requestId,
