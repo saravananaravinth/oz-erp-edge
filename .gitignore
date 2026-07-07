@@ -46,6 +46,7 @@ wrangler-debug.log
 *.secrets
 secrets/
 private/
+oz-erp-edge-worker-sa.json
 
 # Logs
 logs/

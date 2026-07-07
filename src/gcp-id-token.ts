@@ -149,7 +149,9 @@ async function createSignedJwt(input: {
   return `${signingInput}.${signature}`;
 }
 
-function resolveExpiresInSeconds(value: z.output<typeof googleTokenResponseSchema>['expires_in']): number {
+function resolveExpiresInSeconds(
+  value: z.output<typeof googleTokenResponseSchema>['expires_in'],
+): number {
   if (value === undefined) {
     return 3_600;
   }

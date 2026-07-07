@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 30
 
     env:
-      NODE_VERSION: '24'
+      NODE_VERSION: "24"
       WORKER_NAME: oz-erp-edge
       WORKER_ROUTE: api.erp.ozotecev.com/*
       RELEASE_PREFIX: oz-erp-edge

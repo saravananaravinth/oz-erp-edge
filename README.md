@@ -7,8 +7,10 @@ The Worker is intentionally thin:
 - accepts public browser traffic from the Next.js frontend;
 - enforces CORS, request IDs, basic content-type/body limits, and public route allowlists;
 - obtains a Google-signed ID token for Cloud Run invocation;
-- sends the Cloud Run token through `X-Serverless-Authorization` so the user JWT in `Authorization` is preserved for `oz-erp-api`;
-- does **not** perform ERP authorization, RBAC, ABAC, tenant resolution, database access, or business logic.
+- sends the Cloud Run token through `X-Serverless-Authorization` so the user JWT in `Authorization`
+  is preserved for `oz-erp-api`;
+- does **not** perform ERP authorization, RBAC, ABAC, tenant resolution, database access, or
+  business logic.
 
 ## Public route contract
 
@@ -24,7 +26,8 @@ The Worker forwards it privately to Cloud Run as:
 https://<cloud-run-service-url>/erp/auth/login/otp/request
 ```
 
-By default, only `/erp/**` is exposed. `/tasks`, `/metrics`, and health/version backend routes are blocked from frontend proxying.
+By default, only `/erp/**` is exposed. `/tasks`, `/metrics`, and health/version backend routes are
+blocked from frontend proxying.
 
 ## Required Cloudflare variables
 
@@ -79,7 +82,8 @@ base64 -w0 ./edge-worker-sa.json | npx wrangler secret put GCP_SERVICE_ACCOUNT_J
 shred -u ./edge-worker-sa.json
 ```
 
-For production, rotate this key periodically and restrict who can create service account keys in IAM.
+For production, rotate this key periodically and restrict who can create service account keys in
+IAM.
 
 ## Local development
 
@@ -112,13 +116,14 @@ Then call backend resources through the Worker:
 
 ```ts
 await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/erp/auth/login/otp/request`, {
-  method: 'POST',
+  method: "POST",
   headers: {
-    'content-type': 'application/json',
-    'x-request-id': crypto.randomUUID(),
+    "content-type": "application/json",
+    "x-request-id": crypto.randomUUID(),
   },
   body: JSON.stringify(payload),
 });
 ```
 
-Authenticated frontend calls must keep the ERP access token in `Authorization`; the Worker preserves it and uses `X-Serverless-Authorization` only for Cloud Run IAM invocation.
+Authenticated frontend calls must keep the ERP access token in `Authorization`; the Worker preserves
+it and uses `X-Serverless-Authorization` only for Cloud Run IAM invocation.

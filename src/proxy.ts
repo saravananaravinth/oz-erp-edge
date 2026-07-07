@@ -97,7 +97,9 @@ export function resolveBackendPath(pathname: string, config: WorkerConfig): stri
     return null;
   }
 
-  if (!config.ALLOWED_BACKEND_PREFIXES.some((prefix) => pathStartsWithPrefix(backendPath, prefix))) {
+  if (
+    !config.ALLOWED_BACKEND_PREFIXES.some((prefix) => pathStartsWithPrefix(backendPath, prefix))
+  ) {
     return null;
   }
 
@@ -157,7 +159,10 @@ function assertRequestBodyAllowed(
 
   const contentLength = readContentLength(request);
 
-  if (contentLength !== null && (!Number.isFinite(contentLength) || contentLength > config.MAX_BODY_BYTES)) {
+  if (
+    contentLength !== null &&
+    (!Number.isFinite(contentLength) || contentLength > config.MAX_BODY_BYTES)
+  ) {
     return problemJson({
       status: 413,
       code: 'EDGE_PAYLOAD_TOO_LARGE',
@@ -181,7 +186,11 @@ function getClientIp(request: Request): string | null {
   return trimmed.length > 0 && trimmed.length <= 128 ? trimmed : null;
 }
 
-function buildBackendHeaders(request: Request, token: string, requestContext: RequestContext): Headers {
+function buildBackendHeaders(
+  request: Request,
+  token: string,
+  requestContext: RequestContext,
+): Headers {
   const headers = new Headers();
 
   request.headers.forEach((value, name) => {
@@ -318,7 +327,10 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
   });
 
   try {
-    return sanitizeBackendResponse(await fetchWithTimeout(backendRequest, config.FETCH_TIMEOUT_MS), requestContext);
+    return sanitizeBackendResponse(
+      await fetchWithTimeout(backendRequest, config.FETCH_TIMEOUT_MS),
+      requestContext,
+    );
   } catch {
     return problemJson({
       status: 504,

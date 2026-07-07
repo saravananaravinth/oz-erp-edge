@@ -26,7 +26,13 @@ const vitestGlobals = {
 
 export default defineConfig(
   {
-    ignores: ['node_modules/**', 'dist/**', 'coverage/**', '.wrangler/**', 'src/worker-configuration.d.ts'],
+    ignores: [
+      'node_modules/**',
+      'dist/**',
+      'coverage/**',
+      '.wrangler/**',
+      'src/worker-configuration.d.ts',
+    ],
   },
   {
     files: ['src/**/*.ts'],

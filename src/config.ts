@@ -53,7 +53,11 @@ const booleanFromEnv = (defaultValue: boolean) =>
     return value;
   }, z.boolean().default(defaultValue));
 
-const integerFromEnv = (options: { readonly min: number; readonly max: number; readonly defaultValue: number }) =>
+const integerFromEnv = (options: {
+  readonly min: number;
+  readonly max: number;
+  readonly defaultValue: number;
+}) =>
   z.preprocess((value) => {
     if (value === undefined || value === '') {
       return undefined;
@@ -97,26 +101,36 @@ const absolutePathSchema = z
   .regex(/^\/[A-Za-z0-9/_-]*$/u, 'Must be an absolute path.');
 
 const csvList = (defaultValue: string) =>
-  z.preprocess((value) => {
-    if (value === undefined || value === '') {
-      return defaultValue;
-    }
+  z.preprocess(
+    (value) => {
+      if (value === undefined || value === '') {
+        return defaultValue;
+      }
 
-    return value;
-  }, z.string().transform((value, context) => {
-    const items = [...new Set(value.split(',').map((item) => item.trim()).filter(Boolean))];
+      return value;
+    },
+    z.string().transform((value, context) => {
+      const items = [
+        ...new Set(
+          value
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean),
+        ),
+      ];
 
-    if (items.length === 0) {
-      context.addIssue({
-        code: 'custom',
-        message: 'At least one comma-separated value is required.',
-      });
+      if (items.length === 0) {
+        context.addIssue({
+          code: 'custom',
+          message: 'At least one comma-separated value is required.',
+        });
 
-      return z.NEVER;
-    }
+        return z.NEVER;
+      }
 
-    return items;
-  }));
+      return items;
+    }),
+  );
 
 const pathCsvList = (defaultValue: string) =>
   csvList(defaultValue).superRefine((items, context) => {
@@ -147,15 +161,15 @@ const methodCsvList = csvList('GET,POST,PUT,PATCH,DELETE,OPTIONS').superRefine((
 
 const createHeaderNameCsvList = (defaultValue: string) =>
   csvList(defaultValue).superRefine((items, context) => {
-  for (const item of items) {
-    if (!/^[!#$%&'*+\-.^_`|~0-9a-zA-Z]+$/u.test(item)) {
-      context.addIssue({
-        code: 'custom',
-        message: `Invalid header name "${item}".`,
-      });
+    for (const item of items) {
+      if (!/^[!#$%&'*+\-.^_`|~0-9a-zA-Z]+$/u.test(item)) {
+        context.addIssue({
+          code: 'custom',
+          message: `Invalid header name "${item}".`,
+        });
+      }
     }
-  }
-});
+  });
 
 const originCsvList = csvList('http://localhost:3000').superRefine((items, context) => {
   for (const item of items) {

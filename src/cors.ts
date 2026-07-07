@@ -49,7 +49,11 @@ function buildCorsHeaders(origin: string | null, config: WorkerConfig): Headers 
   return headers;
 }
 
-function mergeResponseCorsHeaders(response: Response, origin: string | null, config: WorkerConfig): Response {
+function mergeResponseCorsHeaders(
+  response: Response,
+  origin: string | null,
+  config: WorkerConfig,
+): Response {
   const headers = new Headers(response.headers);
   const corsHeaders = buildCorsHeaders(origin, config);
 
