@@ -184,20 +184,18 @@ const pathCsvList = (defaultValue: string) =>
     }
   });
 
-const methodCsvList = csvList('GET,POST,PUT,PATCH,DELETE,OPTIONS').superRefine(
-  (items, context) => {
-    const allowedMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+const methodCsvList = csvList('GET,POST,PUT,PATCH,DELETE,OPTIONS').superRefine((items, context) => {
+  const allowedMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 
-    for (const item of items) {
-      if (!allowedMethods.has(item)) {
-        context.addIssue({
-          code: 'custom',
-          message: `Unsupported HTTP method "${item}".`,
-        });
-      }
+  for (const item of items) {
+    if (!allowedMethods.has(item)) {
+      context.addIssue({
+        code: 'custom',
+        message: `Unsupported HTTP method "${item}".`,
+      });
     }
-  },
-);
+  }
+});
 
 const createHeaderNameCsvList = (defaultValue: string) =>
   csvList(defaultValue).superRefine((items, context) => {
@@ -323,7 +321,10 @@ const rawConfigSchema = z
       }
     }
 
-    if (resolvedCloudRunAuthMode === 'id_token' && value.GCP_SERVICE_ACCOUNT_JSON_B64 === undefined) {
+    if (
+      resolvedCloudRunAuthMode === 'id_token' &&
+      value.GCP_SERVICE_ACCOUNT_JSON_B64 === undefined
+    ) {
       context.addIssue({
         code: 'custom',
         path: ['GCP_SERVICE_ACCOUNT_JSON_B64'],
