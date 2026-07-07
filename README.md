@@ -1,9 +1,8 @@
 Enterprise Cloudflare Hono Worker gateway for the private `oz-erp-api` Cloud Run service.
 
-`oz-erp-edge` is the public edge boundary for ERP browser/API traffic. It accepts public
-requests on Cloudflare, applies edge-safe validation and CORS controls, obtains a Google-signed
-Cloud Run invocation ID token, and forwards allowed ERP routes to the private `oz-erp-api`
-backend.
+`oz-erp-edge` is the public edge boundary for ERP browser/API traffic. It accepts public requests on
+Cloudflare, applies edge-safe validation and CORS controls, obtains a Google-signed Cloud Run
+invocation ID token, and forwards allowed ERP routes to the private `oz-erp-api` backend.
 
 The Worker must stay intentionally thin. It must not contain ERP business logic, final
 authorization, database access, tenant resolution, RBAC/ABAC decisions, or data mutation logic.
@@ -13,20 +12,20 @@ Those controls remain mandatory inside `oz-erp-api`.
 
 ## Runtime contract
 
-| Area | Standard |
-| --- | --- |
-| Runtime | Cloudflare Workers |
-| Framework | Hono |
-| Language | TypeScript, strict mode |
-| Module system | ESM |
-| Package manager | npm |
-| Node tooling | Node.js `>=24.0.0 <25.0.0`, npm `>=11.0.0` |
-| Public route | `https://api.erp.ozotecev.com/*` |
-| Private backend | `oz-erp-api` on Cloud Run |
-| Cloud Run auth | Google ID token sent through `X-Serverless-Authorization` |
+| Area              | Standard                                                           |
+| ----------------- | ------------------------------------------------------------------ |
+| Runtime           | Cloudflare Workers                                                 |
+| Framework         | Hono                                                               |
+| Language          | TypeScript, strict mode                                            |
+| Module system     | ESM                                                                |
+| Package manager   | npm                                                                |
+| Node tooling      | Node.js `>=24.0.0 <25.0.0`, npm `>=11.0.0`                         |
+| Public route      | `https://api.erp.ozotecev.com/*`                                   |
+| Private backend   | `oz-erp-api` on Cloud Run                                          |
+| Cloud Run auth    | Google ID token sent through `X-Serverless-Authorization`          |
 | Backend user auth | Original user `Authorization` header is preserved for `oz-erp-api` |
-| Config validation | Zod, fail closed |
-| Release title | `oz-erp-edge v<package.version>` |
+| Config validation | Zod, fail closed                                                   |
+| Release title     | `oz-erp-edge v<package.version>`                                   |
 
 ---
 
@@ -52,7 +51,8 @@ The Worker is not responsible for:
 - ERP RBAC, ABAC, or permission decisions.
 - Tenant, organization unit, dealer, financier, or customer ownership checks.
 - JWT claim trust decisions beyond forwarding the user token to the backend.
-- OTP verification, idempotency enforcement, audit writes, webhook verification, or Cloud Task handling.
+- OTP verification, idempotency enforcement, audit writes, webhook verification, or Cloud Task
+  handling.
 - Reading PostgreSQL, Redis, R2, or ERP integration providers directly.
 - Implementing ERP business workflows.
 
@@ -88,18 +88,18 @@ oz-erp-edge/
 
 ### Source ownership
 
-| File | Ownership |
-| --- | --- |
-| `src/index.ts` | Hono app bootstrap, request context/config middleware, route registration, top-level errors |
-| `src/config.ts` | Worker environment schema, defaults, Zod validation, normalized config types |
-| `src/cors.ts` | CORS policy, preflight handling, allowed origin enforcement |
-| `src/gcp-id-token.ts` | Service account parsing, JWT assertion signing, Google ID token exchange/cache |
-| `src/health.ts` | Edge `/livez` and `/readyz` handlers |
-| `src/problem.ts` | Stable edge problem-details responses |
-| `src/proxy.ts` | Route allowlist/blocklist, safe header forwarding, backend fetch, response sanitization |
-| `src/request-context.ts` | Request ID and correlation ID extraction/generation |
-| `src/security.ts` | Edge response security headers |
-| `tests/**` | Config and route-proxy safety tests |
+| File                     | Ownership                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `src/index.ts`           | Hono app bootstrap, request context/config middleware, route registration, top-level errors |
+| `src/config.ts`          | Worker environment schema, defaults, Zod validation, normalized config types                |
+| `src/cors.ts`            | CORS policy, preflight handling, allowed origin enforcement                                 |
+| `src/gcp-id-token.ts`    | Service account parsing, JWT assertion signing, Google ID token exchange/cache              |
+| `src/health.ts`          | Edge `/livez` and `/readyz` handlers                                                        |
+| `src/problem.ts`         | Stable edge problem-details responses                                                       |
+| `src/proxy.ts`           | Route allowlist/blocklist, safe header forwarding, backend fetch, response sanitization     |
+| `src/request-context.ts` | Request ID and correlation ID extraction/generation                                         |
+| `src/security.ts`        | Edge response security headers                                                              |
+| `tests/**`               | Config and route-proxy safety tests                                                         |
 
 ---
 
@@ -117,8 +117,8 @@ The Worker forwards the request privately to Cloud Run:
 https://<cloud-run-service-url>/erp/auth/login/otp/request
 ```
 
-Only backend paths matching the configured allowlist are proxyable. Current production defaults expose
-only `/erp/**`.
+Only backend paths matching the configured allowlist are proxyable. Current production defaults
+expose only `/erp/**`.
 
 Backend-only paths are blocked from public proxying:
 
@@ -205,7 +205,8 @@ The edge gateway is a perimeter control, not a source of final authorization tru
 3. CORS middleware validates origin and handles preflight.
 4. Proxy resolves the public path to an allowed backend path.
 5. Worker creates a Google JWT assertion using the configured service account key.
-6. Worker exchanges the assertion at `GOOGLE_TOKEN_URI` for an ID token targeting `CLOUD_RUN_AUDIENCE`.
+6. Worker exchanges the assertion at `GOOGLE_TOKEN_URI` for an ID token targeting
+   `CLOUD_RUN_AUDIENCE`.
 7. Worker caches the ID token until shortly before expiry.
 8. Worker forwards the request to `CLOUD_RUN_BASE_URL`.
 9. Worker sends the Cloud Run token in `X-Serverless-Authorization`.
@@ -364,18 +365,18 @@ npm run format:check
 
 Available scripts:
 
-| Command | Purpose |
-| --- | --- |
-| `npm run dev` | Run Wrangler development mode |
-| `npm run deploy` | Deploy Worker with Wrangler |
-| `npm run typecheck` | Run TypeScript without emitting |
-| `npm run lint` | Run ESLint with zero warnings |
-| `npm run lint:fix` | Auto-fix lint issues where safe |
-| `npm run format` | Format with Prettier |
-| `npm run format:check` | Check formatting |
-| `npm run test` | Run Vitest |
-| `npm run verify` | Run typecheck, lint, and tests |
-| `npm run cf:typegen` | Generate Cloudflare Worker binding types |
+| Command                | Purpose                                  |
+| ---------------------- | ---------------------------------------- |
+| `npm run dev`          | Run Wrangler development mode            |
+| `npm run deploy`       | Deploy Worker with Wrangler              |
+| `npm run typecheck`    | Run TypeScript without emitting          |
+| `npm run lint`         | Run ESLint with zero warnings            |
+| `npm run lint:fix`     | Auto-fix lint issues where safe          |
+| `npm run format`       | Format with Prettier                     |
+| `npm run format:check` | Check formatting                         |
+| `npm run test`         | Run Vitest                               |
+| `npm run verify`       | Run typecheck, lint, and tests           |
+| `npm run cf:typegen`   | Generate Cloudflare Worker binding types |
 
 ---
 
@@ -508,7 +509,8 @@ Before changing this Worker, verify:
 - `/tasks`, `/metrics`, backend health, and backend version routes remain blocked from proxying.
 - User `Authorization` is preserved for `oz-erp-api`.
 - Cloud Run invocation auth remains in `X-Serverless-Authorization`.
-- Client-supplied `X-Serverless-Authorization`, Cloud Tasks headers, and `X-Oz-Task-Secret` remain stripped.
+- Client-supplied `X-Serverless-Authorization`, Cloud Tasks headers, and `X-Oz-Task-Secret` remain
+  stripped.
 - CORS production rules remain fail-closed.
 - No secrets are moved into `wrangler.toml`, Git, logs, release notes, or normal variables.
 - `npm run typecheck`, `npm run lint`, `npm run test`, and `npm run format:check` pass.
@@ -517,17 +519,17 @@ Before changing this Worker, verify:
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Check |
-| --- | --- | --- |
-| `503 EDGE_CONFIG_INVALID` | Missing/invalid Worker variable or secret | Validate `wrangler.toml` vars and `GCP_SERVICE_ACCOUNT_JSON_B64` secret |
-| `503 EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE` | Service account key invalid, missing secret, bad token URI, or bad audience | Check Worker secret, `CLOUD_RUN_AUDIENCE`, and service account key |
-| `403 EDGE_ORIGIN_FORBIDDEN` | Frontend origin not in `ALLOWED_ORIGINS` | Add the exact origin, including scheme |
-| `403 EDGE_ORIGIN_REQUIRED` | Mutating request without `Origin` | Ensure browser/frontend sends an allowed `Origin` |
-| `404 EDGE_ROUTE_NOT_FOUND` | Path is outside `/erp` or is explicitly blocked | Check `ALLOWED_BACKEND_PREFIXES` and `BLOCKED_BACKEND_PREFIXES` |
-| `413 EDGE_PAYLOAD_TOO_LARGE` | `Content-Length` exceeds `MAX_BODY_BYTES` | Increase only if backend/body-limit policy supports it |
-| `415 EDGE_UNSUPPORTED_MEDIA_TYPE` | Unsupported body content type | Use JSON, multipart, or URL-encoded bodies |
-| `504 EDGE_BACKEND_TIMEOUT` | Cloud Run backend did not respond before timeout | Check `oz-erp-api` readiness, latency, and Cloud Run logs |
-| Cloud Run returns `401/403` | Backend JWT/RBAC or Cloud Run invocation failed | Confirm `X-Serverless-Authorization`, backend `Authorization`, and service account `roles/run.invoker` |
+| Symptom                                | Likely cause                                                                | Check                                                                                                  |
+| -------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `503 EDGE_CONFIG_INVALID`              | Missing/invalid Worker variable or secret                                   | Validate `wrangler.toml` vars and `GCP_SERVICE_ACCOUNT_JSON_B64` secret                                |
+| `503 EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE` | Service account key invalid, missing secret, bad token URI, or bad audience | Check Worker secret, `CLOUD_RUN_AUDIENCE`, and service account key                                     |
+| `403 EDGE_ORIGIN_FORBIDDEN`            | Frontend origin not in `ALLOWED_ORIGINS`                                    | Add the exact origin, including scheme                                                                 |
+| `403 EDGE_ORIGIN_REQUIRED`             | Mutating request without `Origin`                                           | Ensure browser/frontend sends an allowed `Origin`                                                      |
+| `404 EDGE_ROUTE_NOT_FOUND`             | Path is outside `/erp` or is explicitly blocked                             | Check `ALLOWED_BACKEND_PREFIXES` and `BLOCKED_BACKEND_PREFIXES`                                        |
+| `413 EDGE_PAYLOAD_TOO_LARGE`           | `Content-Length` exceeds `MAX_BODY_BYTES`                                   | Increase only if backend/body-limit policy supports it                                                 |
+| `415 EDGE_UNSUPPORTED_MEDIA_TYPE`      | Unsupported body content type                                               | Use JSON, multipart, or URL-encoded bodies                                                             |
+| `504 EDGE_BACKEND_TIMEOUT`             | Cloud Run backend did not respond before timeout                            | Check `oz-erp-api` readiness, latency, and Cloud Run logs                                              |
+| Cloud Run returns `401/403`            | Backend JWT/RBAC or Cloud Run invocation failed                             | Confirm `X-Serverless-Authorization`, backend `Authorization`, and service account `roles/run.invoker` |
 
 ---
 
