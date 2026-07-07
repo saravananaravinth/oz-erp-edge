@@ -1,0 +1,217 @@
+name: Deploy oz-erp-edge to Cloudflare Worker
+
+run-name: Deploy oz-erp-edge @ ${{ github.sha }}
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: oz-erp-edge-production-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  verify-deploy-release:
+    name: Verify, deploy, and release
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 30
+
+    env:
+      NODE_VERSION: '24'
+      WORKER_NAME: oz-erp-edge
+      WORKER_ROUTE: api.erp.ozotecev.com/*
+      RELEASE_PREFIX: oz-erp-edge
+
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate required deployment config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_env=(
+            CLOUDFLARE_ACCOUNT_ID
+            CLOUDFLARE_API_TOKEN
+          )
+
+          missing=0
+          for key in "${required_env[@]}"; do
+            if [[ -z "${!key:-}" ]]; then
+              echo "::error title=Missing deployment config::${key} is not configured."
+              missing=1
+            fi
+          done
+
+          if [[ "${missing}" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          build_utc="$(date -u +'%Y%m%d%H%M%S')"
+
+          release_tag="${RELEASE_PREFIX}-v${package_version}-${build_utc}-${short_sha}"
+          release_title="${RELEASE_PREFIX} v${package_version} production deploy ${short_sha}"
+
+          {
+            echo "package_version=${package_version}"
+            echo "short_sha=${short_sha}"
+            echo "build_utc=${build_utc}"
+            echo "release_tag=${release_tag}"
+            echo "release_title=${release_title}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Deploy Cloudflare Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ env.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+
+      - name: Smoke check Worker livez
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response_file="$(mktemp)"
+          status_code="$(
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --max-time 20 \
+              --output "${response_file}" \
+              --write-out "%{http_code}" \
+              "https://${WORKER_ROUTE%/*}/livez"
+          )"
+
+          if [[ "${status_code}" != "200" ]]; then
+            echo "::error title=Worker smoke check failed::Expected 200 from /livez, got ${status_code}."
+            cat "${response_file}"
+            exit 1
+          fi
+
+      - name: Build release notes
+        id: release_notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          commit_subject="$(git log -1 --pretty=%s)"
+          commit_body="$(git log -1 --pretty=%b)"
+          commit_author="$(git log -1 --pretty='%an <%ae>')"
+          commit_date="$(git log -1 --date=iso-strict --pretty=%cd)"
+          commit_sha="${GITHUB_SHA}"
+          short_sha="${{ steps.release_meta.outputs.short_sha }}"
+          package_version="${{ steps.release_meta.outputs.package_version }}"
+          release_tag="${{ steps.release_meta.outputs.release_tag }}"
+
+          notes_file="release-notes.md"
+
+          {
+            echo "## Deployment Summary"
+            echo
+            echo "- Worker: \`${WORKER_NAME}\`"
+            echo "- Route: \`${WORKER_ROUTE}\`"
+            echo "- Environment: \`production\`"
+            echo "- Version: \`${package_version}\`"
+            echo "- Commit: \`${short_sha}\`"
+            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo "- Release tag: \`${release_tag}\`"
+            echo
+            echo "## Commit Message"
+            echo
+            echo "### ${commit_subject}"
+            echo
+            if [[ -n "${commit_body}" ]]; then
+              echo "${commit_body}"
+              echo
+            else
+              echo "_No extended commit body was provided._"
+              echo
+            fi
+            echo "## Commit Metadata"
+            echo
+            echo "- Author: ${commit_author}"
+            echo "- Commit date: ${commit_date}"
+            echo "- Full SHA: \`${commit_sha}\`"
+            echo
+            echo "## Verification"
+            echo
+            echo "- \`npm ci\` completed"
+            echo "- \`npm run typecheck\` completed"
+            echo "- \`npm run lint\` completed"
+            echo "- \`npm run test\` completed"
+            echo "- \`npm run format:check\` completed"
+            echo "- Cloudflare Worker deploy completed"
+            echo "- Worker \`/livez\` smoke check completed"
+          } > "${notes_file}"
+
+          echo "notes_file=${notes_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh release create "${{ steps.release_meta.outputs.release_tag }}" \
+            --target "${GITHUB_SHA}" \
+            --title "${{ steps.release_meta.outputs.release_title }}" \
+            --notes-file "${{ steps.release_notes.outputs.notes_file }}" \
+            --latest
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## oz-erp-edge deployment completed"
+            echo
+            echo "- Worker: \`${WORKER_NAME}\`"
+            echo "- Route: \`${WORKER_ROUTE}\`"
+            echo "- Release: \`${{ steps.release_meta.outputs.release_tag }}\`"
+            echo "- Commit: \`${{ steps.release_meta.outputs.short_sha }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
