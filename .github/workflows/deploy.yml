@@ -91,7 +91,7 @@ jobs:
           build_utc="$(date -u +'%Y%m%d%H%M%S')"
 
           release_tag="${RELEASE_PREFIX}-v${package_version}-${build_utc}-${short_sha}"
-          release_title="${RELEASE_PREFIX} v${package_version} production deploy ${short_sha}"
+          release_title="${RELEASE_PREFIX} v${package_version}"
 
           {
             echo "package_version=${package_version}"
