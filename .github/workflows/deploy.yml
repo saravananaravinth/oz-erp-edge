@@ -39,7 +39,8 @@ jobs:
       WORKER_NAME: oz-erp-edge
       WORKER_ROUTE: api.erp.ozotecev.com/*
       RELEASE_NAME: oz-erp-edge
-      REQUESTED_RELEASE_TYPE: ${{ github.event_name == 'workflow_dispatch' && inputs.release_type || 'auto' }}
+      REQUESTED_RELEASE_TYPE:
+        ${{ github.event_name == 'workflow_dispatch' && inputs.release_type || 'auto' }}
 
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
