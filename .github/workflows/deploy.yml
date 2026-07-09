@@ -342,6 +342,7 @@ jobs:
           set -euo pipefail
 
           response_file="$(mktemp)"
+          trap 'rm -f "${response_file}"' EXIT
           expected_version="${{ steps.release_meta.outputs.app_version }}"
           worker_livez_url="https://${WORKER_ROUTE%/*}/livez"
 
@@ -358,19 +359,19 @@ jobs:
             )"
 
             actual_version="$(
-              node --input-type=module - "${response_file}" <<'NODE'
-              import fs from 'node:fs';
+              node --input-type=module --eval '
+                import fs from "node:fs";
 
-              const filePath = process.argv[2];
-              try {
-                const body = fs.readFileSync(filePath, 'utf8');
-                const parsed = JSON.parse(body);
-                const version = parsed?.data?.version;
-                process.stdout.write(typeof version === 'string' ? version : '');
-              } catch {
-                process.stdout.write('');
-              }
-              NODE
+                const filePath = process.argv[1];
+                try {
+                  const body = fs.readFileSync(filePath, "utf8");
+                  const parsed = JSON.parse(body);
+                  const version = parsed?.data?.version;
+                  process.stdout.write(typeof version === "string" ? version : "");
+                } catch {
+                  process.stdout.write("");
+                }
+              ' "${response_file}"
             )"
 
             if [[ "${status_code}" == "200" && "${actual_version}" == "${expected_version}" ]]; then
