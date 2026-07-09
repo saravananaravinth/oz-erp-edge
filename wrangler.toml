@@ -1,6 +1,6 @@
 name = "oz-erp-edge"
 main = "src/index.ts"
-compatibility_date = "2026-07-07"
+compatibility_date = "2026-07-06"
 workers_dev = false
 minify = true
 
@@ -10,6 +10,9 @@ routes = [
 
 [observability]
 enabled = true
+
+[placement]
+region = "gcp:asia-south1"
 
 [vars]
 APP_ENV = "production"
