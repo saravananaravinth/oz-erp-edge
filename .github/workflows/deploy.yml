@@ -7,6 +7,18 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release type override. Use auto for Conventional Commit based versioning."
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+          - none
 
 concurrency:
   group: oz-erp-edge-production-worker
@@ -26,7 +38,8 @@ jobs:
       NODE_VERSION: "24"
       WORKER_NAME: oz-erp-edge
       WORKER_ROUTE: api.erp.ozotecev.com/*
-      RELEASE_PREFIX: oz-erp-edge
+      RELEASE_NAME: oz-erp-edge
+      REQUESTED_RELEASE_TYPE: ${{ github.event_name == 'workflow_dispatch' && inputs.release_type || 'auto' }}
 
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -37,6 +50,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch git tags
+        shell: bash
+        run: git fetch --force --tags
+
       - name: Validate required deployment config
         shell: bash
         run: |
@@ -45,6 +62,8 @@ jobs:
           required_env=(
             CLOUDFLARE_ACCOUNT_ID
             CLOUDFLARE_API_TOKEN
+            WORKER_NAME
+            WORKER_ROUTE
           )
 
           missing=0
@@ -56,6 +75,49 @@ jobs:
           done
 
           if [[ "${missing}" -ne 0 ]]; then
+            exit 1
+          fi
+
+          case "${WORKER_ROUTE}" in
+            */*) ;;
+            *)
+              echo "::error title=Invalid WORKER_ROUTE::Worker route must include a path suffix such as /*."
+              exit 1
+              ;;
+          esac
+
+      - name: Validate Worker deployment manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f wrangler.toml ]]; then
+            echo "::error title=Missing wrangler.toml::Cloudflare Worker deployment requires wrangler.toml."
+            exit 1
+          fi
+
+          if ! grep -Eq '^name = "oz-erp-edge"$' wrangler.toml; then
+            echo "::error title=Invalid Worker name::wrangler.toml must deploy the oz-erp-edge Worker."
+            exit 1
+          fi
+
+          if ! grep -Eq '^main = "src/index\.ts"$' wrangler.toml; then
+            echo "::error title=Invalid Worker entrypoint::wrangler.toml main must be src/index.ts."
+            exit 1
+          fi
+
+          if ! grep -Eq '^workers_dev = false$' wrangler.toml; then
+            echo "::error title=Unsafe Worker exposure::workers_dev must be false for production."
+            exit 1
+          fi
+
+          if grep -Eq '^ALLOWED_ORIGINS = ".*\*.*"$' wrangler.toml; then
+            echo "::error title=Unsafe CORS config::Wildcard ALLOWED_ORIGINS is not allowed for production."
+            exit 1
+          fi
+
+          if grep -Eq 'GCP_SERVICE_ACCOUNT_JSON_B64\s*=' wrangler.toml; then
+            echo "::error title=Secret leaked into wrangler.toml::GCP_SERVICE_ACCOUNT_JSON_B64 must be a Cloudflare Worker secret."
             exit 1
           fi
 
@@ -83,25 +145,189 @@ jobs:
       - name: Resolve release metadata
         id: release_meta
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          package_version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
-          short_sha="$(git rev-parse --short=12 HEAD)"
-          build_utc="$(date -u +'%Y%m%d%H%M%S')"
+          package_json_version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          if [[ ! "${package_json_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Invalid package version::package.json version must be SemVer major.minor.patch."
+            exit 1
+          fi
 
-          release_tag="${RELEASE_PREFIX}-v${package_version}-${build_utc}-${short_sha}"
-          release_title="${RELEASE_PREFIX} v${package_version}"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          requested_release_type="${REQUESTED_RELEASE_TYPE:-auto}"
+
+          case "${requested_release_type}" in
+            auto|patch|minor|major|none) ;;
+            *)
+              echo "::error title=Invalid release type::release_type must be auto, patch, minor, major, or none."
+              exit 1
+              ;;
+          esac
+
+          version_candidates="$({
+            gh release list --limit 100 --json tagName,name --jq '.[] | [.tagName, .name] | .[]' 2>/dev/null || true
+            git tag --list "${RELEASE_NAME}-v*" || true
+          } | awk -v tag_prefix="${RELEASE_NAME}-v" -v title_prefix="${RELEASE_NAME} v" '
+            index($0, tag_prefix) == 1 {
+              value = substr($0, length(tag_prefix) + 1)
+              if (match(value, /^[0-9]+\.[0-9]+\.[0-9]+/)) {
+                print substr(value, RSTART, RLENGTH)
+              }
+            }
+            index($0, title_prefix) == 1 {
+              value = substr($0, length(title_prefix) + 1)
+              if (match(value, /^[0-9]+\.[0-9]+\.[0-9]+/)) {
+                print substr(value, RSTART, RLENGTH)
+              }
+            }
+          ' | sort -Vu | uniq)"
+
+          base_version="$(printf '%s\n' "${version_candidates}" | sed '/^$/d' | tail -n 1)"
+          first_release=false
+          if [[ -z "${base_version}" ]]; then
+            base_version="${package_json_version}"
+            first_release=true
+          fi
+
+          previous_tag=""
+          if [[ "${first_release}" == "false" ]]; then
+            previous_tag="$(git tag --list "${RELEASE_NAME}-v${base_version}*" | sort -V | tail -n 1 || true)"
+
+            if [[ -z "${previous_tag}" ]]; then
+              previous_tag="$(gh release list --limit 100 --json tagName,name --jq '.[] | [.tagName, .name] | @tsv' 2>/dev/null \
+                | awk -F '\t' -v release_name="${RELEASE_NAME}" -v version="${base_version}" '
+                    $1 ~ "^" release_name "-v" version { print $1; exit }
+                    $2 == release_name " v" version { print $1; exit }
+                  ' || true)"
+            fi
+          fi
+
+          commit_range=""
+          if [[ -n "${previous_tag}" ]] && git rev-parse -q --verify "${previous_tag}^{commit}" >/dev/null; then
+            commit_range="${previous_tag}..HEAD"
+          fi
+
+          git_log_args=()
+          if [[ -n "${commit_range}" ]]; then
+            git_log_args+=("${commit_range}")
+          fi
+
+          commit_messages="$(git log "${git_log_args[@]}" --pretty=%B)"
+
+          release_type="none"
+          if [[ "${requested_release_type}" == "none" ]]; then
+            release_type="none"
+          elif [[ "${requested_release_type}" != "auto" ]]; then
+            release_type="${requested_release_type}"
+          elif printf '%s\n' "${commit_messages}" | grep -Eq '(^BREAKING CHANGE:|^BREAKING-CHANGE:|^[a-zA-Z]+(\([^)]+\))?!:)'; then
+            release_type="major"
+          elif printf '%s\n' "${commit_messages}" | grep -Eq '^feat(\([^)]+\))?:'; then
+            release_type="minor"
+          elif printf '%s\n' "${commit_messages}" | grep -Eq '^(fix|perf|security|revert)(\([^)]+\))?:'; then
+            release_type="patch"
+          fi
+
+          if [[ "${release_type}" == "none" ]]; then
+            echo "::notice title=No production release::No releasable Conventional Commit was found. Verification completed; Worker deploy and GitHub release steps will be skipped."
+            {
+              echo "release_required=false"
+              echo "release_type=none"
+              echo "base_version=${base_version}"
+              echo "previous_tag=${previous_tag}"
+              echo "commit_range=${commit_range}"
+              echo "short_sha=${short_sha}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          IFS='.' read -r current_major current_minor current_patch <<< "${base_version}"
+
+          if [[ "${first_release}" == "true" ]]; then
+            next_version="${base_version}"
+          elif [[ "${release_type}" == "major" ]]; then
+            next_version="$((current_major + 1)).0.0"
+          elif [[ "${release_type}" == "minor" ]]; then
+            next_version="${current_major}.$((current_minor + 1)).0"
+          else
+            next_version="${current_major}.${current_minor}.$((current_patch + 1))"
+          fi
+
+          release_tag="${RELEASE_NAME}-v${next_version}"
+          release_title="${RELEASE_NAME} v${next_version}"
+
+          if gh release view "${release_tag}" >/dev/null 2>&1; then
+            echo "::error title=Release already exists::${release_tag} already exists. Use a new Conventional Commit or manual release_type override after the next commit."
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
+            echo "::error title=Tag already exists::${release_tag} already exists in Git."
+            exit 1
+          fi
+
+          existing_release_titles="$(gh release list --limit 100 --json name --jq '.[].name' 2>/dev/null || true)"
+          if printf '%s\n' "${existing_release_titles}" | grep -Fxq "${release_title}"; then
+            echo "::error title=Release title already exists::${release_title} already exists."
+            exit 1
+          fi
 
           {
-            echo "package_version=${package_version}"
+            echo "release_required=true"
+            echo "release_type=${release_type}"
+            echo "base_version=${base_version}"
+            echo "package_version=${next_version}"
+            echo "app_version=${next_version}"
             echo "short_sha=${short_sha}"
-            echo "build_utc=${build_utc}"
+            echo "previous_tag=${previous_tag}"
+            echo "commit_range=${commit_range}"
             echo "release_tag=${release_tag}"
             echo "release_title=${release_title}"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Patch Worker runtime version
+        if: steps.release_meta.outputs.release_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const filePath = 'wrangler.toml';
+          const version = process.env.APP_VERSION;
+
+          if (typeof version !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
+            throw new Error('APP_VERSION must be SemVer major.minor.patch.');
+          }
+
+          const current = fs.readFileSync(filePath, 'utf8');
+          const replacement = `APP_VERSION = "${version}"`;
+
+          if (!/^APP_VERSION = ".*"$/m.test(current)) {
+            throw new Error('wrangler.toml must contain an APP_VERSION variable.');
+          }
+
+          const updated = current.replace(/^APP_VERSION = ".*"$/m, replacement);
+          fs.writeFileSync(filePath, updated);
+          NODE
+
+          grep -E '^APP_VERSION = "' wrangler.toml
+        env:
+          APP_VERSION: ${{ steps.release_meta.outputs.app_version }}
+
+      - name: Wrangler dry-run bundle
+        if: steps.release_meta.outputs.release_required == 'true'
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy --dry-run
+
       - name: Deploy Cloudflare Worker
+        if: steps.release_meta.outputs.release_required == 'true'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ env.CLOUDFLARE_API_TOKEN }}
@@ -109,29 +335,60 @@ jobs:
           command: deploy
 
       - name: Smoke check Worker livez
+        if: steps.release_meta.outputs.release_required == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           response_file="$(mktemp)"
-          status_code="$(
-            curl \
-              --silent \
-              --show-error \
-              --location \
-              --max-time 20 \
-              --output "${response_file}" \
-              --write-out "%{http_code}" \
-              "https://${WORKER_ROUTE%/*}/livez"
-          )"
+          expected_version="${{ steps.release_meta.outputs.app_version }}"
+          worker_livez_url="https://${WORKER_ROUTE%/*}/livez"
 
-          if [[ "${status_code}" != "200" ]]; then
-            echo "::error title=Worker smoke check failed::Expected 200 from /livez, got ${status_code}."
-            cat "${response_file}"
-            exit 1
-          fi
+          for attempt in {1..8}; do
+            status_code="$(
+              curl \
+                --silent \
+                --show-error \
+                --location \
+                --max-time 20 \
+                --output "${response_file}" \
+                --write-out "%{http_code}" \
+                "${worker_livez_url}" || true
+            )"
+
+            actual_version="$(
+              node --input-type=module - "${response_file}" <<'NODE'
+              import fs from 'node:fs';
+
+              const filePath = process.argv[2];
+              try {
+                const body = fs.readFileSync(filePath, 'utf8');
+                const parsed = JSON.parse(body);
+                const version = parsed?.data?.version;
+                process.stdout.write(typeof version === 'string' ? version : '');
+              } catch {
+                process.stdout.write('');
+              }
+              NODE
+            )"
+
+            if [[ "${status_code}" == "200" && "${actual_version}" == "${expected_version}" ]]; then
+              exit 0
+            fi
+
+            if [[ "${attempt}" -lt 8 ]]; then
+              echo "Worker smoke check attempt ${attempt} failed: status=${status_code}, version=${actual_version:-missing}. Retrying..."
+              sleep 10
+            fi
+          done
+
+          echo "::error title=Worker smoke check failed::Expected 200 and version ${expected_version} from /livez."
+          echo "Final HTTP status: ${status_code}"
+          cat "${response_file}"
+          exit 1
 
       - name: Build release notes
+        if: steps.release_meta.outputs.release_required == 'true'
         id: release_notes
         shell: bash
         run: |
@@ -143,10 +400,26 @@ jobs:
           commit_date="$(git log -1 --date=iso-strict --pretty=%cd)"
           commit_sha="${GITHUB_SHA}"
           short_sha="${{ steps.release_meta.outputs.short_sha }}"
+          base_version="${{ steps.release_meta.outputs.base_version }}"
           package_version="${{ steps.release_meta.outputs.package_version }}"
+          release_type="${{ steps.release_meta.outputs.release_type }}"
+          previous_tag="${{ steps.release_meta.outputs.previous_tag }}"
+          commit_range="${{ steps.release_meta.outputs.commit_range }}"
           release_tag="${{ steps.release_meta.outputs.release_tag }}"
 
           notes_file="release-notes.md"
+
+          changelog_args=()
+          if [[ -n "${commit_range}" ]]; then
+            changelog_args+=("${commit_range}")
+          else
+            changelog_args+=("--max-count=50")
+          fi
+
+          changelog="$(git log "${changelog_args[@]}" --pretty='- %s (`%h`)' --no-merges)"
+          if [[ -z "${changelog}" ]]; then
+            changelog="- ${commit_subject} (`${short_sha}`)"
+          fi
 
           {
             echo "## Deployment Summary"
@@ -154,18 +427,24 @@ jobs:
             echo "- Worker: \`${WORKER_NAME}\`"
             echo "- Route: \`${WORKER_ROUTE}\`"
             echo "- Environment: \`production\`"
+            echo "- Release type: \`${release_type}\`"
+            echo "- Previous version: \`${base_version}\`"
             echo "- Version: \`${package_version}\`"
+            echo "- Previous tag: \`${previous_tag:-none}\`"
             echo "- Commit: \`${short_sha}\`"
             echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
             echo "- Release tag: \`${release_tag}\`"
+            echo
+            echo "## Changelog"
+            echo
+            printf '%s\n' "${changelog}"
             echo
             echo "## Commit Message"
             echo
             echo "### ${commit_subject}"
             echo
             if [[ -n "${commit_body}" ]]; then
-              echo "${commit_body}"
-              echo
+              printf '%s\n\n' "${commit_body}"
             else
               echo "_No extended commit body was provided._"
               echo
@@ -183,13 +462,17 @@ jobs:
             echo "- \`npm run lint\` completed"
             echo "- \`npm run test\` completed"
             echo "- \`npm run format:check\` completed"
+            echo "- Worker deployment manifest validated"
+            echo "- Worker runtime version patched to \`${package_version}\`"
+            echo "- Wrangler dry-run bundle completed"
             echo "- Cloudflare Worker deploy completed"
-            echo "- Worker \`/livez\` smoke check completed"
+            echo "- Worker \`/livez\` smoke check completed with expected version"
           } > "${notes_file}"
 
           echo "notes_file=${notes_file}" >> "${GITHUB_OUTPUT}"
 
       - name: Create GitHub release
+        if: steps.release_meta.outputs.release_required == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -203,15 +486,41 @@ jobs:
             --latest
 
       - name: Deployment summary
+        if: steps.release_meta.outputs.release_required == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           {
-            echo "## oz-erp-edge deployment completed"
-            echo
-            echo "- Worker: \`${WORKER_NAME}\`"
-            echo "- Route: \`${WORKER_ROUTE}\`"
-            echo "- Release: \`${{ steps.release_meta.outputs.release_tag }}\`"
-            echo "- Commit: \`${{ steps.release_meta.outputs.short_sha }}\`"
+            echo "## oz-erp-edge deployment"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Worker | ${WORKER_NAME} |"
+            echo "| Route | ${WORKER_ROUTE} |"
+            echo "| Release type | ${{ steps.release_meta.outputs.release_type }} |"
+            echo "| Previous version | ${{ steps.release_meta.outputs.base_version }} |"
+            echo "| Version | ${{ steps.release_meta.outputs.package_version }} |"
+            echo "| Commit | ${GITHUB_SHA} |"
+            echo "| Release | ${{ steps.release_meta.outputs.release_tag }} |"
+            echo "| Smoke check | /livez passed |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: No release summary
+        if: steps.release_meta.outputs.release_required != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## oz-erp-edge verification completed"
+            echo ""
+            echo "No production Worker deploy or GitHub release was created because no releasable Conventional Commit was detected."
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Requested release type | ${REQUESTED_RELEASE_TYPE} |"
+            echo "| Base version | ${{ steps.release_meta.outputs.base_version }} |"
+            echo "| Previous tag | ${{ steps.release_meta.outputs.previous_tag }} |"
+            echo "| Commit | ${GITHUB_SHA} |"
           } >> "${GITHUB_STEP_SUMMARY}"
