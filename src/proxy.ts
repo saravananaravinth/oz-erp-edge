@@ -51,6 +51,26 @@ const FORBIDDEN_INBOUND_HEADERS = new Set([
 const FORBIDDEN_RESPONSE_HEADERS = new Set(['server', 'x-powered-by']);
 const METHODS_WITHOUT_BODY = new Set(['GET', 'HEAD']);
 
+// The API accepts one invoice file of at most 10 MiB per multipart request.
+// Keep the normal edge limit unchanged and grant only the exact public
+// warranty-upload endpoint enough multipart envelope headroom.
+const WARRANTY_UPLOAD_MULTIPART_MAX_BODY_BYTES = 11 * 1024 * 1024;
+const WARRANTY_UPLOAD_PATH_PATTERN =
+  /^\/erp\/engagement\/public\/forms\/warranty\/[A-Za-z0-9._~:-]{32,256}\/files$/u;
+
+export function resolveMaxRequestBodyBytes(request: Request, config: WorkerConfig): number {
+  const contentType = request.headers.get('content-type')?.trim().toLowerCase() ?? '';
+  const pathname = new URL(request.url).pathname;
+  const isWarrantyMultipartUpload =
+    request.method.toUpperCase() === 'POST' &&
+    WARRANTY_UPLOAD_PATH_PATTERN.test(pathname) &&
+    contentType.startsWith('multipart/form-data;');
+
+  return isWarrantyMultipartUpload
+    ? WARRANTY_UPLOAD_MULTIPART_MAX_BODY_BYTES
+    : config.MAX_BODY_BYTES;
+}
+
 function pathStartsWithPrefix(pathname: string, prefix: string): boolean {
   return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
@@ -158,11 +178,9 @@ function assertRequestBodyAllowed(
   }
 
   const contentLength = readContentLength(request);
+  const maxBodyBytes = resolveMaxRequestBodyBytes(request, config);
 
-  if (
-    contentLength !== null &&
-    (!Number.isFinite(contentLength) || contentLength > config.MAX_BODY_BYTES)
-  ) {
+  if (contentLength !== null && (!Number.isFinite(contentLength) || contentLength > maxBodyBytes)) {
     return problemJson({
       status: 413,
       code: 'EDGE_PAYLOAD_TOO_LARGE',
