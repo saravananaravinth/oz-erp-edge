@@ -2,6 +2,7 @@
 import type { Context, MiddlewareHandler, Next } from 'hono';
 
 import type { WorkerConfig, WorkerEnv } from './config.js';
+import { shouldRequireOrigin } from './origin-policy.js';
 import { problemJson } from './problem.js';
 import type { RequestContext } from './request-context.js';
 
@@ -26,8 +27,6 @@ type CorsFailureInput = Readonly<{
   origin: string | null;
   config: WorkerConfig;
 }>;
-
-const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 const CORS_RESPONSE_HEADERS = [
   'access-control-allow-origin',
@@ -152,7 +151,6 @@ function applyCorsHeaders(
   const allowOrigin = resolveAllowOriginValue(origin, config);
 
   deleteExistingCorsHeaders(headers);
-
   appendVary(headers, VARY_ORIGIN);
 
   if (options.preflight) {
@@ -209,6 +207,7 @@ export function withCorsHeaders(
 
 function corsFailure(input: CorsFailureInput): Response {
   const requestContext = input.context.get('requestContext');
+
   const response = problemJson({
     status: input.status,
     code: input.code,
@@ -302,6 +301,7 @@ export function createCorsMiddleware(): MiddlewareHandler<{
     const config = context.get('workerConfig');
     const origin = normalizeOptionalHeader(context.req.header('origin') ?? undefined);
     const method = context.req.method.toUpperCase();
+    const path = context.req.path;
 
     if (origin !== null && !isOriginAllowed(origin, config)) {
       return corsFailure({
@@ -315,7 +315,14 @@ export function createCorsMiddleware(): MiddlewareHandler<{
       });
     }
 
-    if (config.REQUIRE_ORIGIN_ON_MUTATION && origin === null && MUTATION_METHODS.has(method)) {
+    if (
+      shouldRequireOrigin({
+        method,
+        path,
+        origin,
+        requireOriginOnMutation: config.REQUIRE_ORIGIN_ON_MUTATION,
+      })
+    ) {
       return corsFailure({
         context,
         status: 403,
