@@ -26,25 +26,25 @@
     "cf:typegen": "wrangler types src/worker-configuration.d.ts"
   },
   "dependencies": {
-    "hono": "^4.0.0",
-    "zod": "^4.0.0"
+    "hono": "4.12.30",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260714.1",
-    "@eslint/js": "^9.0.0",
-    "eslint": "^9.0.0",
-    "eslint-config-prettier": "^10.0.0",
-    "globals": "^16.0.0",
-    "prettier": "^3.0.0",
-    "typescript": "^5.9.0",
-    "typescript-eslint": "^8.0.0",
-    "vitest": "^4.0.0",
-    "wrangler": "^4.0.0"
+    "@cloudflare/workers-types": "5.20260714.1",
+    "@eslint/js": "9.39.5",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "16.5.0",
+    "prettier": "3.9.5",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.64.0",
+    "vitest": "4.1.10",
+    "wrangler": "4.110.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
     "sharp@0.34.5": true,
-    "workerd@1.20260702.1": true
+    "workerd@1.20260708.1": true
   },
-  "packageManager": "npm@11.4.2"
+  "packageManager": "npm@11.16.0"
 }

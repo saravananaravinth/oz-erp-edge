@@ -36,6 +36,7 @@ jobs:
 
     env:
       NODE_VERSION: "24"
+      NPM_VERSION: "11.16.0"
       WORKER_NAME: oz-erp-edge
       WORKER_ROUTE: api.erp.ozotecev.com/*
       RELEASE_NAME: oz-erp-edge
@@ -47,7 +48,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
 
@@ -122,13 +123,112 @@ jobs:
             exit 1
           fi
 
+          if ! grep -Eq '^BACKEND_READINESS_PATH = "/erp/readyz"$' wrangler.toml; then
+            echo "::error title=Invalid readiness contract::BACKEND_READINESS_PATH must match the current oz-erp-api route /erp/readyz."
+            exit 1
+          fi
+
+          blocked_prefixes_csv="$(sed -n 's/^BLOCKED_BACKEND_PREFIXES = "\(.*\)"$/\1/p' wrangler.toml)"
+          IFS=',' read -r -a blocked_prefixes <<< "${blocked_prefixes_csv}"
+          required_blocked_paths=(
+            /tasks
+            /metrics
+            /readyz
+            /healthz
+            /livez
+            /version
+            /erp/metrics
+            /erp/readyz
+            /erp/healthz
+            /erp/livez
+            /erp/version
+          )
+
+          for required_path in "${required_blocked_paths[@]}"; do
+            found=false
+            for blocked_path in "${blocked_prefixes[@]}"; do
+              if [[ "${blocked_path}" == "${required_path}" ]]; then
+                found=true
+                break
+              fi
+            done
+
+            if [[ "${found}" != "true" ]]; then
+              echo "::error title=Unsafe backend route exposure::BLOCKED_BACKEND_PREFIXES must include ${required_path}."
+              exit 1
+            fi
+          done
+
+          if ! grep -Eq '^CORS_ALLOW_CREDENTIALS = "false"$' wrangler.toml; then
+            echo "::error title=Unsafe credentialed CORS::CORS_ALLOW_CREDENTIALS must remain false for Bearer-token API access."
+            exit 1
+          fi
+
+          if ! grep -Eq '^EXPOSED_HEADERS = ".*retry-after.*x-ratelimit-remaining.*"$' wrangler.toml; then
+            echo "::error title=Incomplete CORS telemetry::Rate-limit response headers must be exposed to browser clients."
+            exit 1
+          fi
+
+          if ! grep -Eq '^CLOUD_RUN_AUTH_MODE = "id_token"$' wrangler.toml; then
+            echo "::error title=Unsafe Cloud Run auth mode::Production must use id_token invocation authentication."
+            exit 1
+          fi
+
       - name: Setup Node.js 24
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Install dependencies
+      - name: Pin npm toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global "npm@${NPM_VERSION}"
+          actual_npm_version="$(npm --version)"
+          if [[ "${actual_npm_version}" != "${NPM_VERSION}" ]]; then
+            echo "::error title=Unexpected npm version::Expected npm ${NPM_VERSION}, received ${actual_npm_version}."
+            exit 1
+          fi
+
+      - name: Validate dependency manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f package.json || ! -f package-lock.json ]]; then
+            echo "::error title=Missing dependency manifest::package.json and package-lock.json must both be committed."
+            exit 1
+          fi
+
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const rootLock = packageLock?.packages?.[''];
+
+          if (packageLock?.lockfileVersion !== 3 || typeof rootLock !== 'object' || rootLock === null) {
+            throw new Error('package-lock.json must use lockfileVersion 3 and contain the root package record.');
+          }
+
+          for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+            const declared = packageJson[section] ?? {};
+            const locked = rootLock[section] ?? {};
+
+            if (JSON.stringify(declared) !== JSON.stringify(locked)) {
+              throw new Error(`${section} in package-lock.json is not synchronized with package.json.`);
+            }
+          }
+
+          const expectedPackageManager = `npm@${process.env.NPM_VERSION}`;
+          if (packageJson.packageManager !== expectedPackageManager) {
+            throw new Error(`packageManager must be ${expectedPackageManager}.`);
+          }
+          NODE
+
+      - name: Install dependencies from lockfile
         run: npm ci
 
       - name: Typecheck
@@ -142,6 +242,12 @@ jobs:
 
       - name: Format check
         run: npm run format:check
+
+      - name: Build Worker bundle
+        run: npm run build
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Resolve release metadata
         id: release_meta
@@ -232,14 +338,20 @@ jobs:
           fi
 
           if [[ "${release_type}" == "none" ]]; then
-            echo "::notice title=No production release::No releasable Conventional Commit was found. Verification completed; Worker deploy and GitHub release steps will be skipped."
+            app_version="${base_version}+build.${GITHUB_RUN_NUMBER}.${short_sha}"
+            echo "::notice title=Non-release production deployment::No releasable Conventional Commit was found. The verified commit will deploy with runtime version ${app_version} without creating a GitHub release."
             {
+              echo "deploy_required=true"
               echo "release_required=false"
               echo "release_type=none"
               echo "base_version=${base_version}"
+              echo "package_version=${base_version}"
+              echo "app_version=${app_version}"
               echo "previous_tag=${previous_tag}"
               echo "commit_range=${commit_range}"
               echo "short_sha=${short_sha}"
+              echo "release_tag="
+              echo "release_title="
             } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -276,6 +388,7 @@ jobs:
           fi
 
           {
+            echo "deploy_required=true"
             echo "release_required=true"
             echo "release_type=${release_type}"
             echo "base_version=${base_version}"
@@ -289,7 +402,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Patch Worker runtime version
-        if: steps.release_meta.outputs.release_required == 'true'
+        if: steps.release_meta.outputs.deploy_required == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -300,8 +413,8 @@ jobs:
           const filePath = 'wrangler.toml';
           const version = process.env.APP_VERSION;
 
-          if (typeof version !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
-            throw new Error('APP_VERSION must be SemVer major.minor.patch.');
+          if (typeof version !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+            throw new Error('APP_VERSION must be a valid semantic version.');
           }
 
           const current = fs.readFileSync(filePath, 'utf8');
@@ -320,7 +433,7 @@ jobs:
           APP_VERSION: ${{ steps.release_meta.outputs.app_version }}
 
       - name: Wrangler dry-run bundle
-        if: steps.release_meta.outputs.release_required == 'true'
+        if: steps.release_meta.outputs.deploy_required == 'true'
         shell: bash
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
@@ -328,15 +441,17 @@ jobs:
         run: npx wrangler deploy --dry-run
 
       - name: Deploy Cloudflare Worker
-        if: steps.release_meta.outputs.release_required == 'true'
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ env.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+        if: steps.release_meta.outputs.deploy_required == 'true'
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm run deploy
 
       - name: Smoke check Worker livez
-        if: steps.release_meta.outputs.release_required == 'true'
+        if: steps.release_meta.outputs.deploy_required == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -385,6 +500,59 @@ jobs:
           done
 
           echo "::error title=Worker smoke check failed::Expected 200 and version ${expected_version} from /livez."
+          echo "Final HTTP status: ${status_code}"
+          cat "${response_file}"
+          exit 1
+
+      - name: Smoke check Worker readyz
+        if: steps.release_meta.outputs.deploy_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response_file="$(mktemp)"
+          trap 'rm -f "${response_file}"' EXIT
+          worker_readyz_url="https://${WORKER_ROUTE%/*}/readyz"
+
+          for attempt in {1..8}; do
+            status_code="$(
+              curl \
+                --silent \
+                --show-error \
+                --location \
+                --max-time 20 \
+                --output "${response_file}" \
+                --write-out "%{http_code}" \
+                "${worker_readyz_url}" || true
+            )"
+
+            readiness_status="$(
+              node --input-type=module --eval '
+                import fs from "node:fs";
+
+                const filePath = process.argv[1];
+                try {
+                  const body = fs.readFileSync(filePath, "utf8");
+                  const parsed = JSON.parse(body);
+                  const ready = parsed?.success === true && parsed?.data?.status === "ready";
+                  process.stdout.write(ready ? "ready" : "not_ready");
+                } catch {
+                  process.stdout.write("invalid");
+                }
+              ' "${response_file}"
+            )"
+
+            if [[ "${status_code}" == "200" && "${readiness_status}" == "ready" ]]; then
+              exit 0
+            fi
+
+            if [[ "${attempt}" -lt 8 ]]; then
+              echo "Worker readiness attempt ${attempt} failed: status=${status_code}, contract=${readiness_status}. Retrying..."
+              sleep 10
+            fi
+          done
+
+          echo "::error title=Worker readiness smoke check failed::Expected 200 and a validated ready contract from /readyz."
           echo "Final HTTP status: ${status_code}"
           cat "${response_file}"
           exit 1
@@ -464,11 +632,14 @@ jobs:
             echo "- \`npm run lint\` completed"
             echo "- \`npm run test\` completed"
             echo "- \`npm run format:check\` completed"
+            echo "- \`npm run build\` completed"
+            echo "- \`npm audit --omit=dev --audit-level=high\` completed"
             echo "- Worker deployment manifest validated"
             echo "- Worker runtime version patched to \`${package_version}\`"
             echo "- Wrangler dry-run bundle completed"
             echo "- Cloudflare Worker deploy completed"
             echo "- Worker \`/livez\` smoke check completed with expected version"
+            echo "- Worker \`/readyz\` smoke check completed against private oz-erp-api dependencies"
           } > "${notes_file}"
 
           echo "notes_file=${notes_file}" >> "${GITHUB_OUTPUT}"
@@ -488,10 +659,15 @@ jobs:
             --latest
 
       - name: Deployment summary
-        if: steps.release_meta.outputs.release_required == 'true'
+        if: steps.release_meta.outputs.deploy_required == 'true'
         shell: bash
         run: |
           set -euo pipefail
+
+          release_value="none"
+          if [[ "${{ steps.release_meta.outputs.release_required }}" == "true" ]]; then
+            release_value="${{ steps.release_meta.outputs.release_tag }}"
+          fi
 
           {
             echo "## oz-erp-edge deployment"
@@ -501,28 +677,10 @@ jobs:
             echo "| Worker | ${WORKER_NAME} |"
             echo "| Route | ${WORKER_ROUTE} |"
             echo "| Release type | ${{ steps.release_meta.outputs.release_type }} |"
-            echo "| Previous version | ${{ steps.release_meta.outputs.base_version }} |"
-            echo "| Version | ${{ steps.release_meta.outputs.package_version }} |"
-            echo "| Commit | ${GITHUB_SHA} |"
-            echo "| Release | ${{ steps.release_meta.outputs.release_tag }} |"
-            echo "| Smoke check | /livez passed |"
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: No release summary
-        if: steps.release_meta.outputs.release_required != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "## oz-erp-edge verification completed"
-            echo ""
-            echo "No production Worker deploy or GitHub release was created because no releasable Conventional Commit was detected."
-            echo ""
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Requested release type | ${REQUESTED_RELEASE_TYPE} |"
             echo "| Base version | ${{ steps.release_meta.outputs.base_version }} |"
-            echo "| Previous tag | ${{ steps.release_meta.outputs.previous_tag }} |"
+            echo "| Runtime version | ${{ steps.release_meta.outputs.app_version }} |"
             echo "| Commit | ${GITHUB_SHA} |"
+            echo "| GitHub release | ${release_value} |"
+            echo "| Liveness | /livez passed |"
+            echo "| Readiness | /readyz passed |"
           } >> "${GITHUB_STEP_SUMMARY}"
