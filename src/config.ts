@@ -7,6 +7,7 @@ export type WorkerEnv = Readonly<{
   APP_VERSION?: string;
   PUBLIC_API_PREFIX?: string;
   BACKEND_PATH_PREFIX?: string;
+  BACKEND_READINESS_PATH?: string;
   ALLOWED_BACKEND_PREFIXES?: string;
   BLOCKED_BACKEND_PREFIXES?: string;
   ALLOWED_ORIGINS?: string;
@@ -18,10 +19,12 @@ export type WorkerEnv = Readonly<{
   REQUIRE_ORIGIN_ON_MUTATION?: string;
   MAX_BODY_BYTES?: string;
   FETCH_TIMEOUT_MS?: string;
+  READINESS_TIMEOUT_MS?: string;
   CLOUD_RUN_BASE_URL?: string;
   CLOUD_RUN_AUDIENCE?: string;
   CLOUD_RUN_AUTH_MODE?: string;
   GOOGLE_TOKEN_URI?: string;
+  GOOGLE_TOKEN_TIMEOUT_MS?: string;
   GOOGLE_TOKEN_CACHE_SKEW_SECONDS?: string;
   GCP_SERVICE_ACCOUNT_JSON_B64?: string;
 }>;
@@ -36,9 +39,23 @@ type CloudRunAuthConfig = Readonly<{
 
 const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
 const PRODUCTION_APP_ENV = 'production';
+const REQUIRED_BLOCKED_BACKEND_PREFIXES = [
+  '/tasks',
+  '/metrics',
+  '/readyz',
+  '/healthz',
+  '/livez',
+  '/version',
+  '/erp/metrics',
+  '/erp/readyz',
+  '/erp/healthz',
+  '/erp/livez',
+  '/erp/version',
+] as const;
+const SEMVER_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
 const requiredTrimmedString = z.string().trim().min(1);
-
 const cloudRunAuthModeSchema = z.enum(['auto', 'disabled', 'id_token']).default('auto');
 
 const booleanFromEnv = (defaultValue: boolean) =>
@@ -110,33 +127,68 @@ function isLocalhostHostname(hostname: string): boolean {
 function isHttpUrl(value: string): boolean {
   const url = safeParseUrl(value);
 
-  if (url === null) {
+  return url !== null && (url.protocol === 'https:' || url.protocol === 'http:');
+}
+
+function isExactHttpOrigin(value: string): boolean {
+  const url = safeParseUrl(value);
+
+  if (url === null || (url.protocol !== 'https:' && url.protocol !== 'http:')) {
     return false;
   }
 
-  return url.protocol === 'https:' || url.protocol === 'http:';
+  return (
+    url.username.length === 0 &&
+    url.password.length === 0 &&
+    url.pathname === '/' &&
+    url.search.length === 0 &&
+    url.hash.length === 0 &&
+    url.origin === value
+  );
 }
 
 function isLocalHttpBackend(value: string): boolean {
   const url = safeParseUrl(value);
 
-  if (url === null) {
-    return false;
-  }
+  return url !== null && url.protocol === 'http:' && isLocalhostHostname(url.hostname);
+}
 
-  return url.protocol === 'http:' && isLocalhostHostname(url.hostname);
+function isProductionOrigin(value: string): boolean {
+  const url = safeParseUrl(value);
+
+  return url !== null && url.protocol === 'https:' && !isLocalhostHostname(url.hostname);
 }
 
 const httpUrlString = requiredTrimmedString.refine(isHttpUrl, {
   message: 'Must be a valid http(s) URL.',
 });
 
+const exactHttpOriginString = requiredTrimmedString.refine(isExactHttpOrigin, {
+  message: 'Must be an exact HTTP origin without path, query, fragment, or credentials.',
+});
+
+const semverString = requiredTrimmedString.regex(SEMVER_PATTERN, {
+  message: 'Must be a valid semantic version.',
+});
+
 const absolutePathSchema = z
   .string()
   .trim()
   .min(1)
-  .max(128)
-  .regex(/^\/[A-Za-z0-9/_-]*$/u, 'Must be an absolute path.');
+  .max(256)
+  .regex(/^\/[A-Za-z0-9/_-]*$/u, 'Must be an absolute path.')
+  .refine((value) => value === '/' || !value.endsWith('/'), {
+    message: 'Path must not end with a slash.',
+  });
+
+const optionalAbsolutePathSchema = z
+  .string()
+  .trim()
+  .max(256)
+  .regex(/^$|^\/[A-Za-z0-9/_-]*$/u, 'Must be empty or an absolute path.')
+  .refine((value) => value === '' || value === '/' || !value.endsWith('/'), {
+    message: 'Path must not end with a slash.',
+  });
 
 const csvList = (defaultValue: string) =>
   z.preprocess(
@@ -175,10 +227,10 @@ const pathCsvList = (defaultValue: string) =>
     for (const item of items) {
       const parsed = absolutePathSchema.safeParse(item);
 
-      if (!parsed.success) {
+      if (!parsed.success || item === '/') {
         context.addIssue({
           code: 'custom',
-          message: `Invalid path prefix "${item}".`,
+          message: `Invalid path prefix "${item}". Root prefix is not allowed.`,
         });
       }
     }
@@ -215,7 +267,9 @@ const originCsvList = csvList('http://localhost:3000').superRefine((items, conte
       continue;
     }
 
-    if (!isHttpUrl(item)) {
+    const parsed = exactHttpOriginString.safeParse(item);
+
+    if (!parsed.success) {
       context.addIssue({
         code: 'custom',
         message: `Invalid origin "${item}".`,
@@ -232,37 +286,34 @@ const serviceAccountJsonB64Schema = requiredTrimmedString
 const rawConfigSchema = z
   .object({
     APP_ENV: z.enum(['development', 'staging', 'production']).default('production'),
-    APP_NAME: requiredTrimmedString.default('oz-erp-edge-worker'),
-    APP_VERSION: requiredTrimmedString.default('0.1.0'),
-    PUBLIC_API_PREFIX: z
-      .string()
-      .trim()
-      .max(128)
-      .regex(/^$|^\/[A-Za-z0-9/_-]*$/u, 'Must be empty or an absolute path.')
-      .default(''),
-    BACKEND_PATH_PREFIX: z
-      .string()
-      .trim()
-      .max(128)
-      .regex(/^$|^\/[A-Za-z0-9/_-]*$/u, 'Must be empty or an absolute path.')
-      .default(''),
+    APP_NAME: requiredTrimmedString.max(128).default('oz-erp-edge-worker'),
+    APP_VERSION: semverString.default('0.1.0'),
+    PUBLIC_API_PREFIX: optionalAbsolutePathSchema.default(''),
+    BACKEND_PATH_PREFIX: optionalAbsolutePathSchema.default(''),
+    BACKEND_READINESS_PATH: absolutePathSchema.default('/erp/readyz'),
     ALLOWED_BACKEND_PREFIXES: pathCsvList('/erp'),
-    BLOCKED_BACKEND_PREFIXES: pathCsvList('/tasks,/metrics,/readyz,/healthz,/livez,/version'),
+    BLOCKED_BACKEND_PREFIXES: pathCsvList(
+      '/tasks,/metrics,/readyz,/healthz,/livez,/version,/erp/metrics,/erp/readyz,/erp/healthz,/erp/livez,/erp/version',
+    ),
     ALLOWED_ORIGINS: originCsvList,
     ALLOWED_METHODS: methodCsvList,
     ALLOWED_HEADERS: createHeaderNameCsvList(
       'authorization,content-type,idempotency-key,x-idempotency-key,x-request-id,x-correlation-id,x-tenant-id,x-org-unit-id,x-dealer-org-unit-id,x-financier-id,x-customer-id',
     ),
-    EXPOSED_HEADERS: createHeaderNameCsvList('x-request-id,x-correlation-id'),
+    EXPOSED_HEADERS: createHeaderNameCsvList(
+      'x-request-id,x-correlation-id,retry-after,x-ratelimit-scope,x-ratelimit-limit,x-ratelimit-remaining',
+    ),
     CORS_MAX_AGE_SECONDS: integerFromEnv({ min: 0, max: 86_400, defaultValue: 600 }),
-    CORS_ALLOW_CREDENTIALS: booleanFromEnv(true),
+    CORS_ALLOW_CREDENTIALS: booleanFromEnv(false),
     REQUIRE_ORIGIN_ON_MUTATION: booleanFromEnv(true),
     MAX_BODY_BYTES: integerFromEnv({ min: 1_024, max: 10_485_760, defaultValue: 1_048_576 }),
     FETCH_TIMEOUT_MS: integerFromEnv({ min: 1_000, max: 120_000, defaultValue: 115_000 }),
-    CLOUD_RUN_BASE_URL: httpUrlString,
-    CLOUD_RUN_AUDIENCE: httpUrlString,
+    READINESS_TIMEOUT_MS: integerFromEnv({ min: 500, max: 10_000, defaultValue: 5_000 }),
+    CLOUD_RUN_BASE_URL: exactHttpOriginString,
+    CLOUD_RUN_AUDIENCE: exactHttpOriginString,
     CLOUD_RUN_AUTH_MODE: cloudRunAuthModeSchema,
     GOOGLE_TOKEN_URI: httpUrlString.default('https://oauth2.googleapis.com/token'),
+    GOOGLE_TOKEN_TIMEOUT_MS: integerFromEnv({ min: 500, max: 10_000, defaultValue: 5_000 }),
     GOOGLE_TOKEN_CACHE_SKEW_SECONDS: integerFromEnv({ min: 30, max: 600, defaultValue: 120 }),
     GCP_SERVICE_ACCOUNT_JSON_B64: serviceAccountJsonB64Schema.optional(),
   })
@@ -270,6 +321,7 @@ const rawConfigSchema = z
   .superRefine((value, context) => {
     const resolvedCloudRunAuthMode = resolveCloudRunAuthMode(value);
     const cloudRunBaseUrl = safeParseUrl(value.CLOUD_RUN_BASE_URL);
+    const googleTokenUri = safeParseUrl(value.GOOGLE_TOKEN_URI);
 
     if (value.APP_ENV === PRODUCTION_APP_ENV && value.ALLOWED_ORIGINS.includes('*')) {
       context.addIssue({
@@ -295,7 +347,41 @@ const rawConfigSchema = z
       });
     }
 
+    for (const requiredBlockedPrefix of REQUIRED_BLOCKED_BACKEND_PREFIXES) {
+      if (!value.BLOCKED_BACKEND_PREFIXES.includes(requiredBlockedPrefix)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['BLOCKED_BACKEND_PREFIXES'],
+          message: `Required private backend prefix "${requiredBlockedPrefix}" is missing.`,
+        });
+      }
+    }
+
+    const readinessIsBlocked = value.BLOCKED_BACKEND_PREFIXES.some(
+      (prefix) =>
+        value.BACKEND_READINESS_PATH === prefix ||
+        value.BACKEND_READINESS_PATH.startsWith(`${prefix}/`),
+    );
+
+    if (!readinessIsBlocked) {
+      context.addIssue({
+        code: 'custom',
+        path: ['BLOCKED_BACKEND_PREFIXES'],
+        message: 'BACKEND_READINESS_PATH must be blocked from public proxy access.',
+      });
+    }
+
     if (value.APP_ENV === PRODUCTION_APP_ENV) {
+      for (const origin of value.ALLOWED_ORIGINS) {
+        if (origin !== '*' && !isProductionOrigin(origin)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['ALLOWED_ORIGINS'],
+            message: `Production origin "${origin}" must use HTTPS and must not target localhost.`,
+          });
+        }
+      }
+
       if (cloudRunBaseUrl?.protocol !== 'https:') {
         context.addIssue({
           code: 'custom',
@@ -309,6 +395,14 @@ const rawConfigSchema = z
           code: 'custom',
           path: ['CLOUD_RUN_BASE_URL'],
           message: 'Production Cloud Run base URL must not target localhost.',
+        });
+      }
+
+      if (googleTokenUri?.protocol !== 'https:') {
+        context.addIssue({
+          code: 'custom',
+          path: ['GOOGLE_TOKEN_URI'],
+          message: 'Production Google token URI must use HTTPS.',
         });
       }
 
@@ -342,6 +436,7 @@ export function parseWorkerConfig(env: WorkerEnv): WorkerConfig {
     APP_VERSION: env.APP_VERSION,
     PUBLIC_API_PREFIX: env.PUBLIC_API_PREFIX,
     BACKEND_PATH_PREFIX: env.BACKEND_PATH_PREFIX,
+    BACKEND_READINESS_PATH: env.BACKEND_READINESS_PATH,
     ALLOWED_BACKEND_PREFIXES: env.ALLOWED_BACKEND_PREFIXES,
     BLOCKED_BACKEND_PREFIXES: env.BLOCKED_BACKEND_PREFIXES,
     ALLOWED_ORIGINS: env.ALLOWED_ORIGINS,
@@ -353,10 +448,12 @@ export function parseWorkerConfig(env: WorkerEnv): WorkerConfig {
     REQUIRE_ORIGIN_ON_MUTATION: env.REQUIRE_ORIGIN_ON_MUTATION,
     MAX_BODY_BYTES: env.MAX_BODY_BYTES,
     FETCH_TIMEOUT_MS: env.FETCH_TIMEOUT_MS,
+    READINESS_TIMEOUT_MS: env.READINESS_TIMEOUT_MS,
     CLOUD_RUN_BASE_URL: env.CLOUD_RUN_BASE_URL,
     CLOUD_RUN_AUDIENCE: env.CLOUD_RUN_AUDIENCE,
     CLOUD_RUN_AUTH_MODE: env.CLOUD_RUN_AUTH_MODE,
     GOOGLE_TOKEN_URI: env.GOOGLE_TOKEN_URI,
+    GOOGLE_TOKEN_TIMEOUT_MS: env.GOOGLE_TOKEN_TIMEOUT_MS,
     GOOGLE_TOKEN_CACHE_SKEW_SECONDS: env.GOOGLE_TOKEN_CACHE_SKEW_SECONDS,
     GCP_SERVICE_ACCOUNT_JSON_B64: env.GCP_SERVICE_ACCOUNT_JSON_B64,
   });

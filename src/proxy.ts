@@ -6,6 +6,11 @@ import { normalizeBaseUrl, shouldUseCloudRunIdToken } from './config.js';
 import { getCloudRunIdToken } from './gcp-id-token.js';
 import { problemJson } from './problem.js';
 import type { RequestContext } from './request-context.js';
+import {
+  classifyBackendRoute,
+  resolveBackendPath,
+  type BackendRouteClass,
+} from './route-policy.js';
 import { applySecurityHeaders } from './security.js';
 
 type HonoVariables = Readonly<{
@@ -34,96 +39,157 @@ const FORBIDDEN_INBOUND_HEADERS = new Set([
   'cf-ipcountry',
   'cf-ray',
   'cf-visitor',
+  'content-encoding',
+  'content-length',
   'cookie',
   'forwarded',
   'host',
-  'x-cloudtasks-queuename',
-  'x-cloudtasks-taskexecutioncount',
-  'x-cloudtasks-taskname',
-  'x-cloudtasks-taskretrycount',
   'x-goog-authenticated-user-email',
   'x-goog-authenticated-user-id',
+  'x-oz-edge-gateway',
   'x-oz-task-secret',
   'x-real-ip',
   'x-serverless-authorization',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
 ]);
 
 const FORBIDDEN_RESPONSE_HEADERS = new Set(['server', 'x-powered-by']);
 const METHODS_WITHOUT_BODY = new Set(['GET', 'HEAD']);
-
-// The API accepts one invoice file of at most 10 MiB per multipart request.
-// Keep the normal edge limit unchanged and grant only the exact public
-// warranty-upload endpoint enough multipart envelope headroom.
 const WARRANTY_UPLOAD_MULTIPART_MAX_BODY_BYTES = 11 * 1024 * 1024;
-const WARRANTY_UPLOAD_PATH_PATTERN =
-  /^\/erp\/engagement\/public\/forms\/warranty\/[A-Za-z0-9._~:-]{32,256}\/files$/u;
+const MEDIA_TYPE_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
+const JSON_MEDIA_TYPE_PATTERN = /^application\/(?:json|[!#$%&'*+.^_`|~0-9A-Za-z-]+\+json)$/u;
+const MULTIPART_BOUNDARY_PATTERN = /^[0-9A-Za-z'()+_,./:=?-]{1,70}$/u;
 
-export function resolveMaxRequestBodyBytes(request: Request, config: WorkerConfig): number {
-  const contentType = request.headers.get('content-type')?.trim().toLowerCase() ?? '';
-  const pathname = new URL(request.url).pathname;
-  const isWarrantyMultipartUpload =
-    request.method.toUpperCase() === 'POST' &&
-    WARRANTY_UPLOAD_PATH_PATTERN.test(pathname) &&
-    contentType.startsWith('multipart/form-data;');
+export { resolveBackendPath } from './route-policy.js';
 
-  return isWarrantyMultipartUpload
+export type ParsedContentType = Readonly<{
+  mediaType: string;
+  boundary: string | null;
+}>;
+
+type PreparedRequestBody = Readonly<{
+  body: Uint8Array | null;
+  byteLength: number;
+}>;
+
+type BodyPreparationResult = PreparedRequestBody | Response;
+
+class BackendTimeoutError extends Error {
+  public constructor() {
+    super('Private backend request timed out.');
+    this.name = 'BackendTimeoutError';
+  }
+}
+
+function createTimeoutState(
+  timeoutMs: number,
+  controller: AbortController,
+  error: Error,
+): Readonly<{ promise: Promise<never>; cancel: () => void }> {
+  let rejectTimeout: ((reason: Error) => void) | null = null;
+  const promise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const handle = setTimeout(() => {
+    controller.abort();
+    rejectTimeout?.(error);
+  }, timeoutMs);
+
+  return {
+    promise,
+    cancel: () => {
+      clearTimeout(handle);
+    },
+  };
+}
+
+function isForbiddenInboundHeader(normalizedName: string): boolean {
+  return (
+    HOP_BY_HOP_HEADERS.has(normalizedName) ||
+    FORBIDDEN_INBOUND_HEADERS.has(normalizedName) ||
+    normalizedName.startsWith('cf-') ||
+    normalizedName.startsWith('x-cloudtasks-') ||
+    normalizedName.startsWith('x-goog-') ||
+    normalizedName.startsWith('x-appengine-') ||
+    normalizedName.startsWith('x-envoy-')
+  );
+}
+
+function parseBoundaryParameter(parts: readonly string[]): string | null {
+  for (const rawPart of parts) {
+    const separatorIndex = rawPart.indexOf('=');
+
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const name = rawPart.slice(0, separatorIndex).trim().toLowerCase();
+
+    if (name !== 'boundary') {
+      continue;
+    }
+
+    const rawValue = rawPart.slice(separatorIndex + 1).trim();
+    const value =
+      rawValue.startsWith('"') && rawValue.endsWith('"') && rawValue.length >= 2
+        ? rawValue.slice(1, -1)
+        : rawValue;
+
+    return MULTIPART_BOUNDARY_PATTERN.test(value) ? value : null;
+  }
+
+  return null;
+}
+
+export function parseContentType(value: string | null): ParsedContentType | null {
+  if (value === null) {
+    return null;
+  }
+
+  const parts = value.split(';');
+  const mediaType = parts[0]?.trim().toLowerCase() ?? '';
+
+  if (!MEDIA_TYPE_PATTERN.test(mediaType)) {
+    return null;
+  }
+
+  return {
+    mediaType,
+    boundary: mediaType === 'multipart/form-data' ? parseBoundaryParameter(parts.slice(1)) : null,
+  };
+}
+
+export function resolveMaxRequestBodyBytes(
+  routeClass: BackendRouteClass,
+  config: WorkerConfig,
+): number {
+  return routeClass === 'WARRANTY_MULTIPART'
     ? WARRANTY_UPLOAD_MULTIPART_MAX_BODY_BYTES
     : config.MAX_BODY_BYTES;
 }
 
-function pathStartsWithPrefix(pathname: string, prefix: string): boolean {
-  return pathname === prefix || pathname.startsWith(`${prefix}/`);
-}
-
-function joinPath(prefix: string, pathname: string): string {
-  if (prefix.length === 0) {
-    return pathname;
+export function isContentTypeAllowed(
+  routeClass: BackendRouteClass,
+  contentType: ParsedContentType | null,
+): boolean {
+  if (routeClass === 'RAW_WEBHOOK') {
+    return contentType !== null;
   }
 
-  if (pathname === '/') {
-    return prefix;
+  if (routeClass === 'WARRANTY_MULTIPART') {
+    return contentType?.mediaType === 'multipart/form-data' && contentType.boundary !== null;
   }
 
-  return `${prefix.replace(/\/+$/u, '')}/${pathname.replace(/^\/+/, '')}`;
-}
-
-function stripPublicApiPrefix(pathname: string, publicApiPrefix: string): string | null {
-  if (publicApiPrefix.length === 0) {
-    return pathname;
+  if (contentType === null) {
+    return false;
   }
 
-  if (pathname === publicApiPrefix) {
-    return '/';
-  }
-
-  if (!pathname.startsWith(`${publicApiPrefix}/`)) {
-    return null;
-  }
-
-  const stripped = pathname.slice(publicApiPrefix.length);
-  return stripped.length === 0 ? '/' : stripped;
-}
-
-export function resolveBackendPath(pathname: string, config: WorkerConfig): string | null {
-  const strippedPath = stripPublicApiPrefix(pathname, config.PUBLIC_API_PREFIX);
-
-  if (strippedPath === null) {
-    return null;
-  }
-
-  const backendPath = joinPath(config.BACKEND_PATH_PREFIX, strippedPath);
-
-  if (config.BLOCKED_BACKEND_PREFIXES.some((prefix) => pathStartsWithPrefix(backendPath, prefix))) {
-    return null;
-  }
-
-  if (
-    !config.ALLOWED_BACKEND_PREFIXES.some((prefix) => pathStartsWithPrefix(backendPath, prefix))
-  ) {
-    return null;
-  }
-
-  return backendPath;
+  return (
+    JSON_MEDIA_TYPE_PATTERN.test(contentType.mediaType) ||
+    contentType.mediaType === 'application/x-www-form-urlencoded'
+  );
 }
 
 function readContentLength(request: Request): number | null {
@@ -140,57 +206,165 @@ function readContentLength(request: Request): number | null {
   return Number.parseInt(contentLength, 10);
 }
 
-function isAllowedContentType(request: Request): boolean {
-  const method = request.method.toUpperCase();
+function mergeChunks(chunks: readonly Uint8Array[], byteLength: number): Uint8Array {
+  const body = new Uint8Array(byteLength);
+  let offset = 0;
 
-  if (METHODS_WITHOUT_BODY.has(method)) {
-    return true;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
   }
 
-  const contentType = request.headers.get('content-type')?.toLowerCase() ?? '';
-
-  return (
-    contentType.includes('application/json') ||
-    contentType.includes('multipart/form-data') ||
-    contentType.includes('application/x-www-form-urlencoded')
-  );
+  return body;
 }
 
-function assertRequestBodyAllowed(
+async function readBoundedBody(
   request: Request,
-  config: WorkerConfig,
+  maxBodyBytes: number,
   requestContext: RequestContext,
-): Response | null {
-  const method = request.method.toUpperCase();
+): Promise<BodyPreparationResult> {
+  const declaredContentLength = readContentLength(request);
 
-  if (METHODS_WITHOUT_BODY.has(method)) {
-    return null;
-  }
-
-  if (!isAllowedContentType(request)) {
+  if (declaredContentLength !== null && !Number.isFinite(declaredContentLength)) {
     return problemJson({
-      status: 415,
-      code: 'EDGE_UNSUPPORTED_MEDIA_TYPE',
-      title: 'Unsupported Media Type',
-      detail: 'Only JSON, multipart form, and URL-encoded request bodies are accepted.',
+      status: 400,
+      code: 'EDGE_CONTENT_LENGTH_INVALID',
+      title: 'Invalid Content-Length',
+      detail: 'Content-Length must be a non-negative integer.',
       requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
     });
   }
 
-  const contentLength = readContentLength(request);
-  const maxBodyBytes = resolveMaxRequestBodyBytes(request, config);
-
-  if (contentLength !== null && (!Number.isFinite(contentLength) || contentLength > maxBodyBytes)) {
+  if (declaredContentLength !== null && declaredContentLength > maxBodyBytes) {
     return problemJson({
       status: 413,
       code: 'EDGE_PAYLOAD_TOO_LARGE',
       title: 'Payload Too Large',
       detail: 'The request body is larger than the edge gateway limit.',
       requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
     });
   }
 
-  return null;
+  if (request.body === null || declaredContentLength === 0) {
+    return {
+      body: null,
+      byteLength: 0,
+    };
+  }
+
+  const reader = (request.body as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+
+  try {
+    for (;;) {
+      const result = await reader.read();
+
+      if (result.done) {
+        break;
+      }
+
+      byteLength += result.value.byteLength;
+
+      if (byteLength > maxBodyBytes) {
+        await reader.cancel('edge_payload_too_large');
+
+        return problemJson({
+          status: 413,
+          code: 'EDGE_PAYLOAD_TOO_LARGE',
+          title: 'Payload Too Large',
+          detail: 'The request body is larger than the edge gateway limit.',
+          requestId: requestContext.requestId,
+          correlationId: requestContext.correlationId,
+        });
+      }
+
+      chunks.push(result.value);
+    }
+  } catch {
+    return problemJson({
+      status: 400,
+      code: 'EDGE_REQUEST_BODY_INVALID',
+      title: 'Invalid request body',
+      detail: 'The edge gateway could not read the request body safely.',
+      requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
+    });
+  } finally {
+    reader.releaseLock();
+  }
+
+  return {
+    body: byteLength === 0 ? null : mergeChunks(chunks, byteLength),
+    byteLength,
+  };
+}
+
+async function prepareRequestBody(
+  request: Request,
+  routeClass: BackendRouteClass,
+  config: WorkerConfig,
+  requestContext: RequestContext,
+): Promise<BodyPreparationResult> {
+  const method = request.method.toUpperCase();
+  const contentEncoding = request.headers.get('content-encoding')?.trim().toLowerCase();
+
+  if (contentEncoding !== undefined && contentEncoding !== 'identity') {
+    return problemJson({
+      status: 415,
+      code: 'EDGE_UNSUPPORTED_CONTENT_ENCODING',
+      title: 'Unsupported Content Encoding',
+      detail: 'Compressed request bodies are not accepted by the edge gateway.',
+      requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
+    });
+  }
+
+  if (METHODS_WITHOUT_BODY.has(method)) {
+    return {
+      body: null,
+      byteLength: 0,
+    };
+  }
+
+  const prepared = await readBoundedBody(
+    request,
+    resolveMaxRequestBodyBytes(routeClass, config),
+    requestContext,
+  );
+
+  if (prepared instanceof Response || prepared.byteLength === 0) {
+    return prepared;
+  }
+
+  const rawContentType = request.headers.get('content-type');
+  const contentType = parseContentType(rawContentType);
+
+  if (routeClass === 'RAW_WEBHOOK' && rawContentType === null) {
+    return prepared;
+  }
+
+  if (!isContentTypeAllowed(routeClass, contentType)) {
+    const detail =
+      routeClass === 'WARRANTY_MULTIPART'
+        ? 'Warranty file upload requires multipart/form-data with a valid boundary.'
+        : routeClass === 'RAW_WEBHOOK'
+          ? 'The webhook Content-Type header is malformed.'
+          : 'Only JSON and URL-encoded request bodies are accepted for this ERP route.';
+
+    return problemJson({
+      status: 415,
+      code: 'EDGE_UNSUPPORTED_MEDIA_TYPE',
+      title: 'Unsupported Media Type',
+      detail,
+      requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
+    });
+  }
+
+  return prepared;
 }
 
 function getClientIp(request: Request): string | null {
@@ -205,9 +379,7 @@ function getClientIp(request: Request): string | null {
 }
 
 function resolveForwardedProto(request: Request): 'http' | 'https' {
-  const protocol = new URL(request.url).protocol;
-
-  return protocol === 'http:' ? 'http' : 'https';
+  return new URL(request.url).protocol === 'http:' ? 'http' : 'https';
 }
 
 function buildBackendHeaders(
@@ -220,15 +392,9 @@ function buildBackendHeaders(
   request.headers.forEach((value, name) => {
     const normalizedName = name.toLowerCase();
 
-    if (
-      HOP_BY_HOP_HEADERS.has(normalizedName) ||
-      FORBIDDEN_INBOUND_HEADERS.has(normalizedName) ||
-      normalizedName.startsWith('cf-')
-    ) {
-      return;
+    if (!isForbiddenInboundHeader(normalizedName)) {
+      headers.set(name, value);
     }
-
-    headers.set(name, value);
   });
 
   if (token !== null) {
@@ -259,16 +425,17 @@ function buildBackendUrl(request: Request, backendPath: string, config: WorkerCo
 
 async function fetchWithTimeout(request: Request, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort('edge_backend_timeout');
-  }, timeoutMs);
+  const timeoutState = createTimeoutState(timeoutMs, controller, new BackendTimeoutError());
 
   try {
-    return await fetch(request, {
-      signal: controller.signal,
-    });
+    return await Promise.race([
+      fetch(request, {
+        signal: controller.signal,
+      }),
+      timeoutState.promise,
+    ]);
   } finally {
-    clearTimeout(timeout);
+    timeoutState.cancel();
   }
 }
 
@@ -307,6 +474,7 @@ async function resolveBackendInvocationToken(
       title: 'Service Unavailable',
       detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
       requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
     });
   }
 }
@@ -324,19 +492,7 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
       title: 'Method Not Allowed',
       detail: 'The HTTP method is not allowed by the edge gateway.',
       requestId: requestContext.requestId,
-    });
-  }
-
-  const bodyValidationResponse = assertRequestBodyAllowed(request, config, requestContext);
-
-  if (bodyValidationResponse !== null) {
-    const body = await bodyValidationResponse.text();
-    const headers = new Headers(bodyValidationResponse.headers);
-    headers.set('x-request-id', requestContext.requestId);
-
-    return new Response(body, {
-      status: bodyValidationResponse.status,
-      headers,
+      correlationId: requestContext.correlationId,
     });
   }
 
@@ -350,7 +506,15 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
       title: 'Route not found',
       detail: 'The requested route is not exposed by the edge gateway.',
       requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
     });
+  }
+
+  const routeClass = classifyBackendRoute(method, backendPath);
+  const bodyResult = await prepareRequestBody(request, routeClass, config, requestContext);
+
+  if (bodyResult instanceof Response) {
+    return bodyResult;
   }
 
   const tokenResult = await resolveBackendInvocationToken(config, requestContext);
@@ -362,7 +526,7 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
   const backendRequest = new Request(buildBackendUrl(request, backendPath, config), {
     method: request.method,
     headers: buildBackendHeaders(request, tokenResult, requestContext),
-    body: METHODS_WITHOUT_BODY.has(method) ? null : request.body,
+    body: bodyResult.body,
     redirect: 'manual',
   });
 
@@ -371,13 +535,25 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
       await fetchWithTimeout(backendRequest, config.FETCH_TIMEOUT_MS),
       requestContext,
     );
-  } catch {
+  } catch (error: unknown) {
+    if (error instanceof BackendTimeoutError) {
+      return problemJson({
+        status: 504,
+        code: 'EDGE_BACKEND_TIMEOUT',
+        title: 'Gateway Timeout',
+        detail: 'The private ERP API did not respond before the edge timeout.',
+        requestId: requestContext.requestId,
+        correlationId: requestContext.correlationId,
+      });
+    }
+
     return problemJson({
-      status: 504,
-      code: 'EDGE_BACKEND_TIMEOUT',
-      title: 'Gateway Timeout',
-      detail: 'The private ERP API did not respond before the edge timeout.',
+      status: 502,
+      code: 'EDGE_BACKEND_UNAVAILABLE',
+      title: 'Bad Gateway',
+      detail: 'The private ERP API could not be reached safely.',
       requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
     });
   }
 }

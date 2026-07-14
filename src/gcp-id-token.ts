@@ -18,7 +18,11 @@ const serviceAccountKeySchema = z
 
 const googleTokenResponseSchema = z
   .object({
-    id_token: z.string().min(100).max(8192),
+    id_token: z
+      .string()
+      .min(100)
+      .max(8192)
+      .regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u),
     token_type: z.string().min(1).max(128).optional(),
     expires_in: z.union([z.number().int().positive(), z.string().regex(/^\d+$/u)]).optional(),
   })
@@ -28,12 +32,11 @@ type ServiceAccountKey = z.output<typeof serviceAccountKeySchema>;
 type CachedIdToken = Readonly<{
   value: string;
   expiresAtMs: number;
-  audience: string;
-  clientEmail: string;
+  cacheKey: string;
 }>;
 
-let cachedIdToken: CachedIdToken | null = null;
-let inFlightIdTokenPromise: Promise<CachedIdToken> | null = null;
+const cachedIdTokens = new Map<string, CachedIdToken>();
+const inFlightIdTokenPromises = new Map<string, Promise<CachedIdToken>>();
 
 function base64UrlEncodeBytes(bytes: Uint8Array): string {
   let binary = '';
@@ -86,6 +89,25 @@ function parseServiceAccountKey(config: WorkerConfig): ServiceAccountKey {
   return serviceAccountKeySchema.parse(
     selectServiceAccountFields(decodeBase64Json(config.GCP_SERVICE_ACCOUNT_JSON_B64)),
   );
+}
+
+function resolveTokenUri(config: WorkerConfig, serviceAccount: ServiceAccountKey): string {
+  const tokenUri = serviceAccount.token_uri ?? config.GOOGLE_TOKEN_URI;
+  const parsed = new URL(tokenUri);
+
+  if (config.APP_ENV === 'production' && parsed.protocol !== 'https:') {
+    throw new Error('Production Google token exchange must use HTTPS.');
+  }
+
+  return tokenUri;
+}
+
+function buildCacheKey(
+  config: WorkerConfig,
+  serviceAccount: ServiceAccountKey,
+  tokenUri: string,
+): string {
+  return `${serviceAccount.client_email}|${config.CLOUD_RUN_AUDIENCE}|${tokenUri}`;
 }
 
 function pemToArrayBuffer(privateKeyPem: string): ArrayBuffer {
@@ -163,25 +185,29 @@ function resolveExpiresInSeconds(
   return typeof value === 'number' ? value : Number.parseInt(value, 10);
 }
 
-async function fetchGoogleSignedIdToken(config: WorkerConfig): Promise<CachedIdToken> {
-  const serviceAccount = parseServiceAccountKey(config);
-  const tokenUri = serviceAccount.token_uri ?? config.GOOGLE_TOKEN_URI;
+async function exchangeGoogleIdToken(input: {
+  readonly config: WorkerConfig;
+  readonly serviceAccount: ServiceAccountKey;
+  readonly tokenUri: string;
+  readonly cacheKey: string;
+}): Promise<CachedIdToken> {
   const assertion = await createSignedJwt({
-    serviceAccount,
-    audience: config.CLOUD_RUN_AUDIENCE,
-    tokenUri,
+    serviceAccount: input.serviceAccount,
+    audience: input.config.CLOUD_RUN_AUDIENCE,
+    tokenUri: input.tokenUri,
   });
   const form = new URLSearchParams({
     grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
     assertion,
   });
-  const response = await fetch(tokenUri, {
+  const response = await fetch(input.tokenUri, {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
       accept: 'application/json',
     },
     body: form.toString(),
+    signal: AbortSignal.timeout(input.config.GOOGLE_TOKEN_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -191,39 +217,47 @@ async function fetchGoogleSignedIdToken(config: WorkerConfig): Promise<CachedIdT
   const body: unknown = await response.json();
   const parsed = googleTokenResponseSchema.parse(body);
   const expiresInSeconds = resolveExpiresInSeconds(parsed.expires_in);
-  const safeTtlSeconds = Math.max(60, expiresInSeconds - config.GOOGLE_TOKEN_CACHE_SKEW_SECONDS);
+  const safeTtlSeconds = Math.max(
+    60,
+    expiresInSeconds - input.config.GOOGLE_TOKEN_CACHE_SKEW_SECONDS,
+  );
 
   return {
     value: parsed.id_token,
     expiresAtMs: Date.now() + safeTtlSeconds * 1_000,
-    audience: config.CLOUD_RUN_AUDIENCE,
-    clientEmail: serviceAccount.client_email,
+    cacheKey: input.cacheKey,
   };
 }
 
 export async function getCloudRunIdToken(config: WorkerConfig): Promise<string> {
-  const cached = cachedIdToken;
+  const serviceAccount = parseServiceAccountKey(config);
+  const tokenUri = resolveTokenUri(config, serviceAccount);
+  const cacheKey = buildCacheKey(config, serviceAccount, tokenUri);
+  const cached = cachedIdTokens.get(cacheKey);
 
-  if (
-    cached !== null &&
-    cached.audience === config.CLOUD_RUN_AUDIENCE &&
-    cached.expiresAtMs > Date.now() + 30_000
-  ) {
+  if (cached !== undefined && cached.expiresAtMs > Date.now() + 30_000) {
     return cached.value;
   }
 
-  if (inFlightIdTokenPromise !== null) {
-    const token = await inFlightIdTokenPromise;
-    return token.value;
+  const existingPromise = inFlightIdTokenPromises.get(cacheKey);
+
+  if (existingPromise !== undefined) {
+    return (await existingPromise).value;
   }
 
-  inFlightIdTokenPromise = fetchGoogleSignedIdToken(config);
+  const tokenPromise = exchangeGoogleIdToken({
+    config,
+    serviceAccount,
+    tokenUri,
+    cacheKey,
+  });
+  inFlightIdTokenPromises.set(cacheKey, tokenPromise);
 
   try {
-    const token = await inFlightIdTokenPromise;
-    cachedIdToken = token;
+    const token = await tokenPromise;
+    cachedIdTokens.set(cacheKey, token);
     return token.value;
   } finally {
-    inFlightIdTokenPromise = null;
+    inFlightIdTokenPromises.delete(cacheKey);
   }
 }

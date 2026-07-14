@@ -3,6 +3,7 @@ import type { Context, MiddlewareHandler, Next } from 'hono';
 
 import type { WorkerConfig, WorkerEnv } from './config.js';
 import { shouldRequireOrigin } from './origin-policy.js';
+import { resolveBackendPath } from './route-policy.js';
 import { problemJson } from './problem.js';
 import type { RequestContext } from './request-context.js';
 
@@ -301,7 +302,7 @@ export function createCorsMiddleware(): MiddlewareHandler<{
     const config = context.get('workerConfig');
     const origin = normalizeOptionalHeader(context.req.header('origin') ?? undefined);
     const method = context.req.method.toUpperCase();
-    const path = context.req.path;
+    const backendPath = resolveBackendPath(context.req.path, config);
 
     if (origin !== null && !isOriginAllowed(origin, config)) {
       return corsFailure({
@@ -318,7 +319,7 @@ export function createCorsMiddleware(): MiddlewareHandler<{
     if (
       shouldRequireOrigin({
         method,
-        path,
+        backendPath,
         origin,
         requireOriginOnMutation: config.REQUIRE_ORIGIN_ON_MUTATION,
       })
