@@ -3,6 +3,8 @@ import type { WorkerConfig } from './config.js';
 
 const WEBHOOK_ENDPOINT_KEY_PATTERN = '[A-Za-z0-9._:-]{8,160}';
 const PUBLIC_TOKEN_PATTERN = '[A-Za-z0-9._~:-]{32,256}';
+const UUID_PATTERN =
+  '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
 
 const TELECMI_WEBHOOK_PATTERN = new RegExp(
   `^/erp/channel-ingest/webhooks/telecmi/${WEBHOOK_ENDPOINT_KEY_PATTERN}$`,
@@ -20,6 +22,26 @@ const WARRANTY_UPLOAD_PATTERN = new RegExp(
   `^/erp/engagement/public/forms/warranty/${PUBLIC_TOKEN_PATTERN}/files$`,
   'u',
 );
+
+const OWNER_GUIDE_LOCATION_REQUEST_PATTERN = new RegExp(
+  `^/erp/engagement/owner-guide/location-requests/${UUID_PATTERN}/location$`,
+  'u',
+);
+const OWNER_GUIDE_ASSIGNMENT_ACTION_PATTERN = new RegExp(
+  `^/erp/engagement/owner-guide/assignments/${UUID_PATTERN}/(?:accept|reject|visit|test-drive-complete)$`,
+  'u',
+);
+const AUTH_SESSION_REVOKE_PATTERN = new RegExp(
+  `^/erp/auth/sessions/(?:current|${UUID_PATTERN})$`,
+  'u',
+);
+
+const NATIVE_APP_EXACT_MUTATION_ROUTES = new Set([
+  'POST /erp/auth/login/otp/request',
+  'POST /erp/auth/login/otp/verify',
+  'POST /erp/auth/token/refresh',
+  'PUT /erp/engagement/owner-guide/me/location',
+]);
 
 export type BackendRouteClass = 'ERP_STANDARD' | 'RAW_WEBHOOK' | 'WARRANTY_MULTIPART';
 
@@ -98,4 +120,33 @@ export function classifyBackendRoute(method: string, backendPath: string): Backe
 
 export function isOriginOptionalServerToServerRoute(method: string, backendPath: string): boolean {
   return classifyBackendRoute(method, backendPath) === 'RAW_WEBHOOK';
+}
+
+export function isOriginOptionalNativeAppRoute(method: string, backendPath: string): boolean {
+  const normalizedMethod = method.trim().toUpperCase();
+  const routeKey = `${normalizedMethod} ${backendPath}`;
+
+  if (NATIVE_APP_EXACT_MUTATION_ROUTES.has(routeKey)) {
+    return true;
+  }
+
+  if (normalizedMethod === 'DELETE' && AUTH_SESSION_REVOKE_PATTERN.test(backendPath)) {
+    return true;
+  }
+
+  if (normalizedMethod !== 'POST') {
+    return false;
+  }
+
+  return (
+    OWNER_GUIDE_LOCATION_REQUEST_PATTERN.test(backendPath) ||
+    OWNER_GUIDE_ASSIGNMENT_ACTION_PATTERN.test(backendPath)
+  );
+}
+
+export function isOriginOptionalRoute(method: string, backendPath: string): boolean {
+  return (
+    isOriginOptionalServerToServerRoute(method, backendPath) ||
+    isOriginOptionalNativeAppRoute(method, backendPath)
+  );
 }

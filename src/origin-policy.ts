@@ -1,5 +1,5 @@
 // oz-erp-edge/src/origin-policy.ts
-import { isOriginOptionalServerToServerRoute } from './route-policy.js';
+import { isOriginOptionalRoute } from './route-policy.js';
 
 const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -27,5 +27,5 @@ export function shouldRequireOrigin(input: OriginRequirementInput): boolean {
     return false;
   }
 
-  return !isOriginOptionalServerToServerRoute(input.method, input.backendPath);
+  return !isOriginOptionalRoute(input.method, input.backendPath);
 }
