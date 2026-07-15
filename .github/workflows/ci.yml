@@ -22,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38

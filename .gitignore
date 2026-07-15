@@ -63,6 +63,7 @@ debug.log
 coverage/
 .nyc_output/
 junit.xml
+results.sarif
 test-results/
 playwright-report/
 bundles/
