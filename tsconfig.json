@@ -5,7 +5,6 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "moduleDetection": "force",
-    "types": ["@cloudflare/workers-types"],
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
@@ -39,6 +38,6 @@
     "noEmitOnError": true,
     "skipLibCheck": false
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/worker-configuration.d.ts"],
   "exclude": ["node_modules", "dist", "coverage", ".wrangler"]
 }

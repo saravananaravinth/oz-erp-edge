@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "oz-erp-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-15",
+  "workers_dev": false,
+  "minify": true,
+  "routes": [{ "pattern": "api.erp.ozotecev.com/*", "zone_name": "ozotecev.com" }],
+  "placement": { "region": "gcp:asia-south1" },
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 0.1, "invocation_logs": true },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  },
+  "vars": {
+    "APP_ENV": "production",
+    "APP_NAME": "oz-erp-edge",
+    "APP_VERSION": "0.1.0",
+    "PUBLIC_API_PREFIX": "",
+    "BACKEND_PATH_PREFIX": "",
+    "BACKEND_READINESS_PATH": "/erp/readyz",
+    "ALLOWED_BACKEND_PREFIXES": "/erp",
+    "BLOCKED_BACKEND_PREFIXES": "/tasks,/metrics,/readyz,/healthz,/livez,/version,/erp/metrics,/erp/readyz,/erp/healthz,/erp/livez,/erp/version",
+    "ALLOWED_ORIGINS": "https://erp.ozotecev.com,https://www.ozotecev.com",
+    "ALLOWED_METHODS": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+    "ALLOWED_HEADERS": "authorization,content-type,idempotency-key,x-idempotency-key,x-request-id,x-correlation-id,x-tenant-id,x-org-unit-id,x-dealer-org-unit-id,x-financier-id,x-customer-id",
+    "EXPOSED_HEADERS": "x-request-id,x-correlation-id,retry-after,x-ratelimit-scope,x-ratelimit-limit,x-ratelimit-remaining",
+    "CORS_MAX_AGE_SECONDS": "600",
+    "CORS_ALLOW_CREDENTIALS": "false",
+    "REQUIRE_ORIGIN_ON_MUTATION": "true",
+    "MAX_BODY_BYTES": "1048576",
+    "FETCH_TIMEOUT_MS": "115000",
+    "READINESS_TIMEOUT_MS": "5000",
+    "CLOUD_RUN_BASE_URL": "https://oz-erp-api-963011711716.asia-south1.run.app",
+    "CLOUD_RUN_AUDIENCE": "https://oz-erp-api-963011711716.asia-south1.run.app",
+    "CLOUD_RUN_AUTH_MODE": "id_token",
+    "GOOGLE_TOKEN_URI": "https://oauth2.googleapis.com/token",
+    "GOOGLE_TOKEN_TIMEOUT_MS": "5000",
+    "GOOGLE_TOKEN_CACHE_SKEW_SECONDS": "120"
+  }
+}

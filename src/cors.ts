@@ -137,6 +137,35 @@ function appendVary(headers: Headers, value: string): void {
   }
 }
 
+function isExactHttpOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+
+    return (
+      (url.protocol === 'https:' || url.protocol === 'http:') &&
+      url.username.length === 0 &&
+      url.password.length === 0 &&
+      url.pathname === '/' &&
+      url.search.length === 0 &&
+      url.hash.length === 0 &&
+      url.origin === value
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isRawAllowedOrigin(origin: string, rawAllowedOrigins: string | undefined): boolean {
+  if (!isExactHttpOrigin(origin)) {
+    return false;
+  }
+
+  return (rawAllowedOrigins ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .some((value) => value !== WILDCARD_ORIGIN && value === origin);
+}
+
 function deleteExistingCorsHeaders(headers: Headers): void {
   for (const headerName of CORS_RESPONSE_HEADERS) {
     headers.delete(headerName);
@@ -198,6 +227,27 @@ export function withCorsHeaders(
   applyCorsHeaders(headers, origin, config, {
     preflight: options.preflight === true,
   });
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+export function withConfigFailureCorsHeaders(
+  response: Response,
+  origin: string | null,
+  rawAllowedOrigins: string | undefined,
+): Response {
+  const headers = new Headers(response.headers);
+
+  deleteExistingCorsHeaders(headers);
+  appendVary(headers, VARY_ORIGIN);
+
+  if (origin !== null && isRawAllowedOrigin(origin, rawAllowedOrigins)) {
+    headers.set('access-control-allow-origin', origin);
+  }
 
   return new Response(response.body, {
     status: response.status,

@@ -33,7 +33,7 @@ const config = {
       },
     },
     {
-      files: ['*.yml', '*.yaml', 'wrangler.toml'],
+      files: ['*.yml', '*.yaml'],
       options: {
         singleQuote: false,
       },

@@ -1,686 +1,81 @@
-name: Deploy oz-erp-edge to Cloudflare Worker
-
-run-name: Deploy oz-erp-edge @ ${{ github.sha }}
+name: Deploy verified Edge version
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      release_type:
-        description: "Release type override. Use auto for Conventional Commit based versioning."
-        required: false
-        default: auto
-        type: choice
-        options:
-          - auto
-          - patch
-          - minor
-          - major
-          - none
+  workflow_run:
+    workflows: ["Verify immutable Edge bundle"]
+    types: [completed]
 
 concurrency:
-  group: oz-erp-edge-production-worker
+  group: oz-erp-edge-production
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  actions: read
+  contents: read
 
 jobs:
-  verify-deploy-release:
-    name: Verify, deploy, and release
+  deploy:
+    if:
+      github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch ==
+      'main'
     runs-on: ubuntu-24.04
     environment: production
-    timeout-minutes: 30
-
+    timeout-minutes: 10
     env:
-      NODE_VERSION: "24"
-      NPM_VERSION: "11.16.0"
-      WORKER_NAME: oz-erp-edge
-      WORKER_ROUTE: api.erp.ozotecev.com/*
-      RELEASE_NAME: oz-erp-edge
-      REQUESTED_RELEASE_TYPE:
-        ${{ github.event_name == 'workflow_dispatch' && inputs.release_type || 'auto' }}
-
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.0
-        with:
-          fetch-depth: 0
-
-      - name: Fetch git tags
-        shell: bash
-        run: git fetch --force --tags
-
-      - name: Validate required deployment config
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          required_env=(
-            CLOUDFLARE_ACCOUNT_ID
-            CLOUDFLARE_API_TOKEN
-            WORKER_NAME
-            WORKER_ROUTE
-          )
-
-          missing=0
-          for key in "${required_env[@]}"; do
-            if [[ -z "${!key:-}" ]]; then
-              echo "::error title=Missing deployment config::${key} is not configured."
-              missing=1
-            fi
-          done
-
-          if [[ "${missing}" -ne 0 ]]; then
-            exit 1
-          fi
-
-          case "${WORKER_ROUTE}" in
-            */*) ;;
-            *)
-              echo "::error title=Invalid WORKER_ROUTE::Worker route must include a path suffix such as /*."
-              exit 1
-              ;;
-          esac
-
-      - name: Validate Worker deployment manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ ! -f wrangler.toml ]]; then
-            echo "::error title=Missing wrangler.toml::Cloudflare Worker deployment requires wrangler.toml."
-            exit 1
-          fi
-
-          if ! grep -Eq '^name = "oz-erp-edge"$' wrangler.toml; then
-            echo "::error title=Invalid Worker name::wrangler.toml must deploy the oz-erp-edge Worker."
-            exit 1
-          fi
-
-          if ! grep -Eq '^main = "src/index\.ts"$' wrangler.toml; then
-            echo "::error title=Invalid Worker entrypoint::wrangler.toml main must be src/index.ts."
-            exit 1
-          fi
-
-          if ! grep -Eq '^workers_dev = false$' wrangler.toml; then
-            echo "::error title=Unsafe Worker exposure::workers_dev must be false for production."
-            exit 1
-          fi
-
-          if grep -Eq '^ALLOWED_ORIGINS = ".*\*.*"$' wrangler.toml; then
-            echo "::error title=Unsafe CORS config::Wildcard ALLOWED_ORIGINS is not allowed for production."
-            exit 1
-          fi
-
-          if grep -Eq 'GCP_SERVICE_ACCOUNT_JSON_B64\s*=' wrangler.toml; then
-            echo "::error title=Secret leaked into wrangler.toml::GCP_SERVICE_ACCOUNT_JSON_B64 must be a Cloudflare Worker secret."
-            exit 1
-          fi
-
-          if ! grep -Eq '^BACKEND_READINESS_PATH = "/erp/readyz"$' wrangler.toml; then
-            echo "::error title=Invalid readiness contract::BACKEND_READINESS_PATH must match the current oz-erp-api route /erp/readyz."
-            exit 1
-          fi
-
-          blocked_prefixes_csv="$(sed -n 's/^BLOCKED_BACKEND_PREFIXES = "\(.*\)"$/\1/p' wrangler.toml)"
-          IFS=',' read -r -a blocked_prefixes <<< "${blocked_prefixes_csv}"
-          required_blocked_paths=(
-            /tasks
-            /metrics
-            /readyz
-            /healthz
-            /livez
-            /version
-            /erp/metrics
-            /erp/readyz
-            /erp/healthz
-            /erp/livez
-            /erp/version
-          )
-
-          for required_path in "${required_blocked_paths[@]}"; do
-            found=false
-            for blocked_path in "${blocked_prefixes[@]}"; do
-              if [[ "${blocked_path}" == "${required_path}" ]]; then
-                found=true
-                break
-              fi
-            done
-
-            if [[ "${found}" != "true" ]]; then
-              echo "::error title=Unsafe backend route exposure::BLOCKED_BACKEND_PREFIXES must include ${required_path}."
-              exit 1
-            fi
-          done
-
-          if ! grep -Eq '^CORS_ALLOW_CREDENTIALS = "false"$' wrangler.toml; then
-            echo "::error title=Unsafe credentialed CORS::CORS_ALLOW_CREDENTIALS must remain false for Bearer-token API access."
-            exit 1
-          fi
-
-          if ! grep -Eq '^EXPOSED_HEADERS = ".*retry-after.*x-ratelimit-remaining.*"$' wrangler.toml; then
-            echo "::error title=Incomplete CORS telemetry::Rate-limit response headers must be exposed to browser clients."
-            exit 1
-          fi
-
-          if ! grep -Eq '^CLOUD_RUN_AUTH_MODE = "id_token"$' wrangler.toml; then
-            echo "::error title=Unsafe Cloud Run auth mode::Production must use id_token invocation authentication."
-            exit 1
-          fi
-
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Pin npm toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm install --global "npm@${NPM_VERSION}"
-          actual_npm_version="$(npm --version)"
-          if [[ "${actual_npm_version}" != "${NPM_VERSION}" ]]; then
-            echo "::error title=Unexpected npm version::Expected npm ${NPM_VERSION}, received ${actual_npm_version}."
-            exit 1
-          fi
-
-      - name: Validate dependency manifests
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ ! -f package.json || ! -f package-lock.json ]]; then
-            echo "::error title=Missing dependency manifest::package.json and package-lock.json must both be committed."
-            exit 1
-          fi
-
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-
-          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
-          const rootLock = packageLock?.packages?.[''];
-
-          if (packageLock?.lockfileVersion !== 3 || typeof rootLock !== 'object' || rootLock === null) {
-            throw new Error('package-lock.json must use lockfileVersion 3 and contain the root package record.');
-          }
-
-          for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
-            const declared = packageJson[section] ?? {};
-            const locked = rootLock[section] ?? {};
-
-            if (JSON.stringify(declared) !== JSON.stringify(locked)) {
-              throw new Error(`${section} in package-lock.json is not synchronized with package.json.`);
-            }
-          }
-
-          const expectedPackageManager = `npm@${process.env.NPM_VERSION}`;
-          if (packageJson.packageManager !== expectedPackageManager) {
-            throw new Error(`packageManager must be ${expectedPackageManager}.`);
-          }
-          NODE
-
-      - name: Install dependencies from lockfile
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm run test
-
-      - name: Format check
-        run: npm run format:check
-
-      - name: Build Worker bundle
-        run: npm run build
-
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
-
-      - name: Resolve release metadata
-        id: release_meta
-        shell: bash
+      - name: Download exact verified bundle
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          package_json_version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
-          if [[ ! "${package_json_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error title=Invalid package version::package.json version must be SemVer major.minor.patch."
-            exit 1
-          fi
-
-          short_sha="$(git rev-parse --short=12 HEAD)"
-          requested_release_type="${REQUESTED_RELEASE_TYPE:-auto}"
-
-          case "${requested_release_type}" in
-            auto|patch|minor|major|none) ;;
-            *)
-              echo "::error title=Invalid release type::release_type must be auto, patch, minor, major, or none."
-              exit 1
-              ;;
-          esac
-
-          version_candidates="$({
-            gh release list --limit 100 --json tagName,name --jq '.[] | [.tagName, .name] | .[]' 2>/dev/null || true
-            git tag --list "${RELEASE_NAME}-v*" || true
-          } | awk -v tag_prefix="${RELEASE_NAME}-v" -v title_prefix="${RELEASE_NAME} v" '
-            index($0, tag_prefix) == 1 {
-              value = substr($0, length(tag_prefix) + 1)
-              if (match(value, /^[0-9]+\.[0-9]+\.[0-9]+/)) {
-                print substr(value, RSTART, RLENGTH)
-              }
-            }
-            index($0, title_prefix) == 1 {
-              value = substr($0, length(title_prefix) + 1)
-              if (match(value, /^[0-9]+\.[0-9]+\.[0-9]+/)) {
-                print substr(value, RSTART, RLENGTH)
-              }
-            }
-          ' | sort -Vu | uniq)"
-
-          base_version="$(printf '%s\n' "${version_candidates}" | sed '/^$/d' | tail -n 1)"
-          first_release=false
-          if [[ -z "${base_version}" ]]; then
-            base_version="${package_json_version}"
-            first_release=true
-          fi
-
-          previous_tag=""
-          if [[ "${first_release}" == "false" ]]; then
-            previous_tag="$(git tag --list "${RELEASE_NAME}-v${base_version}*" | sort -V | tail -n 1 || true)"
-
-            if [[ -z "${previous_tag}" ]]; then
-              previous_tag="$(gh release list --limit 100 --json tagName,name --jq '.[] | [.tagName, .name] | @tsv' 2>/dev/null \
-                | awk -F '\t' -v release_name="${RELEASE_NAME}" -v version="${base_version}" '
-                    $1 ~ "^" release_name "-v" version { print $1; exit }
-                    $2 == release_name " v" version { print $1; exit }
-                  ' || true)"
-            fi
-          fi
-
-          commit_range=""
-          if [[ -n "${previous_tag}" ]] && git rev-parse -q --verify "${previous_tag}^{commit}" >/dev/null; then
-            commit_range="${previous_tag}..HEAD"
-          fi
-
-          git_log_args=()
-          if [[ -n "${commit_range}" ]]; then
-            git_log_args+=("${commit_range}")
-          fi
-
-          commit_messages="$(git log "${git_log_args[@]}" --pretty=%B)"
-
-          release_type="none"
-          if [[ "${requested_release_type}" == "none" ]]; then
-            release_type="none"
-          elif [[ "${requested_release_type}" != "auto" ]]; then
-            release_type="${requested_release_type}"
-          elif printf '%s\n' "${commit_messages}" | grep -Eq '(^BREAKING CHANGE:|^BREAKING-CHANGE:|^[a-zA-Z]+(\([^)]+\))?!:)'; then
-            release_type="major"
-          elif printf '%s\n' "${commit_messages}" | grep -Eq '^feat(\([^)]+\))?:'; then
-            release_type="minor"
-          elif printf '%s\n' "${commit_messages}" | grep -Eq '^(fix|perf|security|revert)(\([^)]+\))?:'; then
-            release_type="patch"
-          fi
-
-          if [[ "${release_type}" == "none" ]]; then
-            app_version="${base_version}+build.${GITHUB_RUN_NUMBER}.${short_sha}"
-            echo "::notice title=Non-release production deployment::No releasable Conventional Commit was found. The verified commit will deploy with runtime version ${app_version} without creating a GitHub release."
-            {
-              echo "deploy_required=true"
-              echo "release_required=false"
-              echo "release_type=none"
-              echo "base_version=${base_version}"
-              echo "package_version=${base_version}"
-              echo "app_version=${app_version}"
-              echo "previous_tag=${previous_tag}"
-              echo "commit_range=${commit_range}"
-              echo "short_sha=${short_sha}"
-              echo "release_tag="
-              echo "release_title="
-            } >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          IFS='.' read -r current_major current_minor current_patch <<< "${base_version}"
-
-          if [[ "${first_release}" == "true" ]]; then
-            next_version="${base_version}"
-          elif [[ "${release_type}" == "major" ]]; then
-            next_version="$((current_major + 1)).0.0"
-          elif [[ "${release_type}" == "minor" ]]; then
-            next_version="${current_major}.$((current_minor + 1)).0"
-          else
-            next_version="${current_major}.${current_minor}.$((current_patch + 1))"
-          fi
-
-          release_tag="${RELEASE_NAME}-v${next_version}"
-          release_title="${RELEASE_NAME} v${next_version}"
-
-          if gh release view "${release_tag}" >/dev/null 2>&1; then
-            echo "::error title=Release already exists::${release_tag} already exists. Use a new Conventional Commit or manual release_type override after the next commit."
-            exit 1
-          fi
-
-          if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
-            echo "::error title=Tag already exists::${release_tag} already exists in Git."
-            exit 1
-          fi
-
-          existing_release_titles="$(gh release list --limit 100 --json name --jq '.[].name' 2>/dev/null || true)"
-          if printf '%s\n' "${existing_release_titles}" | grep -Fxq "${release_title}"; then
-            echo "::error title=Release title already exists::${release_title} already exists."
-            exit 1
-          fi
-
-          {
-            echo "deploy_required=true"
-            echo "release_required=true"
-            echo "release_type=${release_type}"
-            echo "base_version=${base_version}"
-            echo "package_version=${next_version}"
-            echo "app_version=${next_version}"
-            echo "short_sha=${short_sha}"
-            echo "previous_tag=${previous_tag}"
-            echo "commit_range=${commit_range}"
-            echo "release_tag=${release_tag}"
-            echo "release_title=${release_title}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Patch Worker runtime version
-        if: steps.release_meta.outputs.deploy_required == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-
-          const filePath = 'wrangler.toml';
-          const version = process.env.APP_VERSION;
-
-          if (typeof version !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
-            throw new Error('APP_VERSION must be a valid semantic version.');
-          }
-
-          const current = fs.readFileSync(filePath, 'utf8');
-          const replacement = `APP_VERSION = "${version}"`;
-
-          if (!/^APP_VERSION = ".*"$/m.test(current)) {
-            throw new Error('wrangler.toml must contain an APP_VERSION variable.');
-          }
-
-          const updated = current.replace(/^APP_VERSION = ".*"$/m, replacement);
-          fs.writeFileSync(filePath, updated);
-          NODE
-
-          grep -E '^APP_VERSION = "' wrangler.toml
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run:
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "edge-bundle-$SHA" --dir
+          artifact
+      - name: Validate artifact identity
         env:
-          APP_VERSION: ${{ steps.release_meta.outputs.app_version }}
-
-      - name: Wrangler dry-run bundle
-        if: steps.release_meta.outputs.deploy_required == 'true'
-        shell: bash
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(jq -r .sha artifact/edge-artifact.json)" = "$SHA"
+          test -s artifact/index.js
+          test -s artifact/wrangler.jsonc
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Install pinned deployment client only
+        run: npm install --global wrangler@4.110.0
+      - name: Upload prebuilt version at zero traffic
+        id: upload
+        working-directory: artifact
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version edge-artifact.json)"
+          wrangler versions upload index.js --no-bundle --config wrangler.jsonc --tag "$version" --strict
+          versions="$(wrangler versions list --name oz-erp-edge --json)"
+          id="$(jq -r --arg tag "$version" '[.[] | select((.tag // .metadata.tag // .annotations["workers/tag"]) == $tag)][0].id // empty' <<< "$versions")"
+          [[ "$id" =~ ^[0-9a-f-]{36}$ ]]
+          echo "version_id=$id" >> "$GITHUB_OUTPUT"
+      - name: Verify with version override and promote
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
-        run: npx wrangler deploy --dry-run
-
-      - name: Deploy Cloudflare Worker
-        if: steps.release_meta.outputs.deploy_required == 'true'
-        shell: bash
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
+          NEW_VERSION: ${{ steps.upload.outputs.version_id }}
         run: |
           set -euo pipefail
-          npm run deploy
-
-      - name: Smoke check Worker livez
-        if: steps.release_meta.outputs.deploy_required == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          response_file="$(mktemp)"
-          trap 'rm -f "${response_file}"' EXIT
-          expected_version="${{ steps.release_meta.outputs.app_version }}"
-          worker_livez_url="https://${WORKER_ROUTE%/*}/livez"
-
-          for attempt in {1..8}; do
-            status_code="$(
-              curl \
-                --silent \
-                --show-error \
-                --location \
-                --max-time 20 \
-                --output "${response_file}" \
-                --write-out "%{http_code}" \
-                "${worker_livez_url}" || true
-            )"
-
-            actual_version="$(
-              node --input-type=module --eval '
-                import fs from "node:fs";
-
-                const filePath = process.argv[1];
-                try {
-                  const body = fs.readFileSync(filePath, "utf8");
-                  const parsed = JSON.parse(body);
-                  const version = parsed?.data?.version;
-                  process.stdout.write(typeof version === "string" ? version : "");
-                } catch {
-                  process.stdout.write("");
-                }
-              ' "${response_file}"
-            )"
-
-            if [[ "${status_code}" == "200" && "${actual_version}" == "${expected_version}" ]]; then
-              exit 0
-            fi
-
-            if [[ "${attempt}" -lt 8 ]]; then
-              echo "Worker smoke check attempt ${attempt} failed: status=${status_code}, version=${actual_version:-missing}. Retrying..."
-              sleep 10
-            fi
-          done
-
-          echo "::error title=Worker smoke check failed::Expected 200 and version ${expected_version} from /livez."
-          echo "Final HTTP status: ${status_code}"
-          cat "${response_file}"
-          exit 1
-
-      - name: Smoke check Worker readyz
-        if: steps.release_meta.outputs.deploy_required == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          response_file="$(mktemp)"
-          trap 'rm -f "${response_file}"' EXIT
-          worker_readyz_url="https://${WORKER_ROUTE%/*}/readyz"
-
-          for attempt in {1..8}; do
-            status_code="$(
-              curl \
-                --silent \
-                --show-error \
-                --location \
-                --max-time 20 \
-                --output "${response_file}" \
-                --write-out "%{http_code}" \
-                "${worker_readyz_url}" || true
-            )"
-
-            readiness_status="$(
-              node --input-type=module --eval '
-                import fs from "node:fs";
-
-                const filePath = process.argv[1];
-                try {
-                  const body = fs.readFileSync(filePath, "utf8");
-                  const parsed = JSON.parse(body);
-                  const ready = parsed?.success === true && parsed?.data?.status === "ready";
-                  process.stdout.write(ready ? "ready" : "not_ready");
-                } catch {
-                  process.stdout.write("invalid");
-                }
-              ' "${response_file}"
-            )"
-
-            if [[ "${status_code}" == "200" && "${readiness_status}" == "ready" ]]; then
-              exit 0
-            fi
-
-            if [[ "${attempt}" -lt 8 ]]; then
-              echo "Worker readiness attempt ${attempt} failed: status=${status_code}, contract=${readiness_status}. Retrying..."
-              sleep 10
-            fi
-          done
-
-          echo "::error title=Worker readiness smoke check failed::Expected 200 and a validated ready contract from /readyz."
-          echo "Final HTTP status: ${status_code}"
-          cat "${response_file}"
-          exit 1
-
-      - name: Build release notes
-        if: steps.release_meta.outputs.release_required == 'true'
-        id: release_notes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          commit_subject="$(git log -1 --pretty=%s)"
-          commit_body="$(git log -1 --pretty=%b)"
-          commit_author="$(git log -1 --pretty='%an <%ae>')"
-          commit_date="$(git log -1 --date=iso-strict --pretty=%cd)"
-          commit_sha="${GITHUB_SHA}"
-          short_sha="${{ steps.release_meta.outputs.short_sha }}"
-          base_version="${{ steps.release_meta.outputs.base_version }}"
-          package_version="${{ steps.release_meta.outputs.package_version }}"
-          release_type="${{ steps.release_meta.outputs.release_type }}"
-          previous_tag="${{ steps.release_meta.outputs.previous_tag }}"
-          commit_range="${{ steps.release_meta.outputs.commit_range }}"
-          release_tag="${{ steps.release_meta.outputs.release_tag }}"
-
-          notes_file="release-notes.md"
-
-          changelog_args=()
-          if [[ -n "${commit_range}" ]]; then
-            changelog_args+=("${commit_range}")
-          else
-            changelog_args+=("--max-count=50")
-          fi
-
-          changelog="$(git log "${changelog_args[@]}" --pretty='- %s (`%h`)' --no-merges)"
-          if [[ -z "${changelog}" ]]; then
-            changelog="- ${commit_subject} (`${short_sha}`)"
-          fi
-
-          {
-            echo "## Deployment Summary"
-            echo
-            echo "- Worker: \`${WORKER_NAME}\`"
-            echo "- Route: \`${WORKER_ROUTE}\`"
-            echo "- Environment: \`production\`"
-            echo "- Release type: \`${release_type}\`"
-            echo "- Previous version: \`${base_version}\`"
-            echo "- Version: \`${package_version}\`"
-            echo "- Previous tag: \`${previous_tag:-none}\`"
-            echo "- Commit: \`${short_sha}\`"
-            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
-            echo "- Release tag: \`${release_tag}\`"
-            echo
-            echo "## Changelog"
-            echo
-            printf '%s\n' "${changelog}"
-            echo
-            echo "## Commit Message"
-            echo
-            echo "### ${commit_subject}"
-            echo
-            if [[ -n "${commit_body}" ]]; then
-              printf '%s\n\n' "${commit_body}"
+          current_json="$(wrangler deployments status --name oz-erp-edge --json)"
+          OLD_VERSION="$(jq -r '.versions | max_by(.percentage) | .version_id' <<< "$current_json")"
+          rollback() { wrangler versions deploy "$OLD_VERSION@100%" --name oz-erp-edge -y; }
+          trap rollback ERR
+          wrangler versions deploy "$OLD_VERSION@100%" "$NEW_VERSION@0%" --name oz-erp-edge -y
+          curl --fail --silent --show-error --retry 3 -H "Cloudflare-Workers-Version-Overrides: oz-erp-edge=$NEW_VERSION" https://api.erp.ozotecev.com/livez >/dev/null
+          for percent in 5 25 100; do
+            old=$((100-percent))
+            if [[ "$percent" -eq 100 ]]; then
+              wrangler versions deploy "$NEW_VERSION@100%" --name oz-erp-edge -y
             else
-              echo "_No extended commit body was provided._"
-              echo
+              wrangler versions deploy "$OLD_VERSION@$old%" "$NEW_VERSION@$percent%" --name oz-erp-edge -y
             fi
-            echo "## Commit Metadata"
-            echo
-            echo "- Author: ${commit_author}"
-            echo "- Commit date: ${commit_date}"
-            echo "- Full SHA: \`${commit_sha}\`"
-            echo
-            echo "## Verification"
-            echo
-            echo "- \`npm ci\` completed"
-            echo "- \`npm run typecheck\` completed"
-            echo "- \`npm run lint\` completed"
-            echo "- \`npm run test\` completed"
-            echo "- \`npm run format:check\` completed"
-            echo "- \`npm run build\` completed"
-            echo "- \`npm audit --omit=dev --audit-level=high\` completed"
-            echo "- Worker deployment manifest validated"
-            echo "- Worker runtime version patched to \`${package_version}\`"
-            echo "- Wrangler dry-run bundle completed"
-            echo "- Cloudflare Worker deploy completed"
-            echo "- Worker \`/livez\` smoke check completed with expected version"
-            echo "- Worker \`/readyz\` smoke check completed against private oz-erp-api dependencies"
-          } > "${notes_file}"
-
-          echo "notes_file=${notes_file}" >> "${GITHUB_OUTPUT}"
-
-      - name: Create GitHub release
-        if: steps.release_meta.outputs.release_required == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          gh release create "${{ steps.release_meta.outputs.release_tag }}" \
-            --target "${GITHUB_SHA}" \
-            --title "${{ steps.release_meta.outputs.release_title }}" \
-            --notes-file "${{ steps.release_notes.outputs.notes_file }}" \
-            --latest
-
-      - name: Deployment summary
-        if: steps.release_meta.outputs.deploy_required == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          release_value="none"
-          if [[ "${{ steps.release_meta.outputs.release_required }}" == "true" ]]; then
-            release_value="${{ steps.release_meta.outputs.release_tag }}"
-          fi
-
-          {
-            echo "## oz-erp-edge deployment"
-            echo ""
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Worker | ${WORKER_NAME} |"
-            echo "| Route | ${WORKER_ROUTE} |"
-            echo "| Release type | ${{ steps.release_meta.outputs.release_type }} |"
-            echo "| Base version | ${{ steps.release_meta.outputs.base_version }} |"
-            echo "| Runtime version | ${{ steps.release_meta.outputs.app_version }} |"
-            echo "| Commit | ${GITHUB_SHA} |"
-            echo "| GitHub release | ${release_value} |"
-            echo "| Liveness | /livez passed |"
-            echo "| Readiness | /readyz passed |"
-          } >> "${GITHUB_STEP_SUMMARY}"
+            curl --fail --silent --show-error --retry 3 https://api.erp.ozotecev.com/livez >/dev/null
+          done
+          trap - ERR

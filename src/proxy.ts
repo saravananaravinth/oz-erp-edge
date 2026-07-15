@@ -16,6 +16,8 @@ import { applySecurityHeaders } from './security.js';
 type HonoVariables = Readonly<{
   requestContext: RequestContext;
   workerConfig: WorkerConfig;
+  routeClass?: string;
+  backendDurationMs?: number;
 }>;
 
 type HonoContext = Context<{
@@ -70,7 +72,7 @@ export type ParsedContentType = Readonly<{
 }>;
 
 type PreparedRequestBody = Readonly<{
-  body: Uint8Array | null;
+  body: BodyInit | null;
   byteLength: number;
 }>;
 
@@ -329,39 +331,66 @@ async function prepareRequestBody(
     };
   }
 
-  const prepared = await readBoundedBody(
-    request,
-    resolveMaxRequestBodyBytes(routeClass, config),
-    requestContext,
-  );
+  const maxBodyBytes = resolveMaxRequestBodyBytes(routeClass, config);
+  const declaredContentLength = readContentLength(request);
 
-  if (prepared instanceof Response || prepared.byteLength === 0) {
-    return prepared;
+  if (declaredContentLength !== null && !Number.isFinite(declaredContentLength)) {
+    return problemJson({
+      status: 400,
+      code: 'EDGE_CONTENT_LENGTH_INVALID',
+      title: 'Invalid Content-Length',
+      detail: 'Content-Length must be a non-negative integer.',
+      requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
+    });
+  }
+
+  if (declaredContentLength !== null && declaredContentLength > maxBodyBytes) {
+    return problemJson({
+      status: 413,
+      code: 'EDGE_PAYLOAD_TOO_LARGE',
+      title: 'Payload Too Large',
+      detail: 'The request body is larger than the edge gateway limit.',
+      requestId: requestContext.requestId,
+      correlationId: requestContext.correlationId,
+    });
+  }
+
+  if (request.body === null || declaredContentLength === 0) {
+    return { body: null, byteLength: 0 };
   }
 
   const rawContentType = request.headers.get('content-type');
   const contentType = parseContentType(rawContentType);
 
-  if (routeClass === 'RAW_WEBHOOK' && rawContentType === null) {
-    return prepared;
+  if (!(routeClass === 'RAW_WEBHOOK' && rawContentType === null)) {
+    if (!isContentTypeAllowed(routeClass, contentType)) {
+      const detail =
+        routeClass === 'WARRANTY_MULTIPART'
+          ? 'Warranty file upload requires multipart/form-data with a valid boundary.'
+          : routeClass === 'RAW_WEBHOOK'
+            ? 'The webhook Content-Type header is malformed.'
+            : 'Only JSON and URL-encoded request bodies are accepted for this ERP route.';
+
+      return problemJson({
+        status: 415,
+        code: 'EDGE_UNSUPPORTED_MEDIA_TYPE',
+        title: 'Unsupported Media Type',
+        detail,
+        requestId: requestContext.requestId,
+        correlationId: requestContext.correlationId,
+      });
+    }
   }
 
-  if (!isContentTypeAllowed(routeClass, contentType)) {
-    const detail =
-      routeClass === 'WARRANTY_MULTIPART'
-        ? 'Warranty file upload requires multipart/form-data with a valid boundary.'
-        : routeClass === 'RAW_WEBHOOK'
-          ? 'The webhook Content-Type header is malformed.'
-          : 'Only JSON and URL-encoded request bodies are accepted for this ERP route.';
+  if (declaredContentLength !== null) {
+    return { body: request.body, byteLength: declaredContentLength };
+  }
 
-    return problemJson({
-      status: 415,
-      code: 'EDGE_UNSUPPORTED_MEDIA_TYPE',
-      title: 'Unsupported Media Type',
-      detail,
-      requestId: requestContext.requestId,
-      correlationId: requestContext.correlationId,
-    });
+  const prepared = await readBoundedBody(request, maxBodyBytes, requestContext);
+
+  if (prepared instanceof Response || prepared.byteLength === 0) {
+    return prepared;
   }
 
   return prepared;
@@ -511,6 +540,7 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
   }
 
   const routeClass = classifyBackendRoute(method, backendPath);
+  context.set('routeClass', routeClass);
   const bodyResult = await prepareRequestBody(request, routeClass, config, requestContext);
 
   if (bodyResult instanceof Response) {
@@ -530,12 +560,20 @@ export async function proxyToCloudRun(context: HonoContext): Promise<Response> {
     redirect: 'manual',
   });
 
+  const backendStartedAt = performance.now();
+
   try {
-    return sanitizeBackendResponse(
-      await fetchWithTimeout(backendRequest, config.FETCH_TIMEOUT_MS),
-      requestContext,
+    const backendResponse = await fetchWithTimeout(backendRequest, config.FETCH_TIMEOUT_MS);
+    context.set(
+      'backendDurationMs',
+      Math.round((performance.now() - backendStartedAt) * 100) / 100,
     );
+    return sanitizeBackendResponse(backendResponse, requestContext);
   } catch (error: unknown) {
+    context.set(
+      'backendDurationMs',
+      Math.round((performance.now() - backendStartedAt) * 100) / 100,
+    );
     if (error instanceof BackendTimeoutError) {
       return problemJson({
         status: 504,

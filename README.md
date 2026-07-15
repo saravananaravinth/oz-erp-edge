@@ -100,9 +100,9 @@ envelope limit around the API's authoritative 10 MiB single-file limit.
 | Warranty file upload | Multipart with a valid boundary                               | 11 MiB                              |
 | Empty mutation       | No `Content-Type` required                                    | 0 bytes                             |
 
-The Worker reads the incoming stream into a bounded buffer before invoking Cloud Run. Therefore,
-missing, invalid, or misleading `Content-Length` values cannot bypass the edge limit or cause a
-partially forwarded oversized mutation.
+Requests with a valid, bounded `Content-Length` stream directly to Cloud Run. When the length is
+absent, the Worker uses bounded buffering before invoking Cloud Run, so an unbounded mutation is
+never partially forwarded.
 
 ## CORS
 
@@ -112,7 +112,7 @@ with the `Authorization` header, not cookies. Exposed response headers include r
 
 ## Configuration
 
-Non-secret production values are stored in `wrangler.toml`. The service account JSON is a Worker
+Non-secret production values are stored in `wrangler.jsonc`. The service account JSON is a Worker
 secret and must never be committed:
 
 ```bash
@@ -121,6 +121,18 @@ npx wrangler secret put GCP_SERVICE_ACCOUNT_JSON_B64
 
 The value is the base64/base64url-encoded service account JSON. The service account requires only
 the permission needed to invoke the private Cloud Run service.
+
+The protected infrastructure workflow authenticates to Google Cloud through keyless Workload
+Identity Federation. Configure these non-sensitive GitHub Actions repository variables with the same
+values used by `oz-erp-api`:
+
+```text
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/<project-number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+GCP_DEPLOYER_SERVICE_ACCOUNT=<account>@ozotec-erp.iam.gserviceaccount.com
+```
+
+The deployer identity is separate from the Worker invocation credential above. Its federation trust
+must be restricted to the main branches of the two Ozotec repositories.
 
 Important production variables:
 
@@ -159,7 +171,6 @@ Wrangler secret storage.
 ```bash
 npm run typecheck
 npm run lint
-npm run test
 npm run format:check
 npm run build
 npm audit --omit=dev --audit-level=high
@@ -171,38 +182,25 @@ Or run:
 npm run verify
 ```
 
-The test suite covers configuration fail-closed behavior, blocked backend routes, route-specific
-content types, bounded bodies without trusted `Content-Length`, privileged-header stripping, webhook
-origin exemptions, strict backend readiness validation, CORS telemetry, and security-header
-hardening.
+The selected repository policy deliberately omits automated test suites. Pull-request and exact-SHA
+verification retain generated binding checks, type checking, linting, formatting, dependency audit,
+strict bundle validation, secret scanning, and startup profiling.
 
 ## Deployment and release behavior
 
-The production workflow always verifies and deploys the commit after a successful main-branch run.
-
-- Releasable Conventional Commits create a semantic GitHub release named `oz-erp-edge v<version>`.
-- A non-releasable commit still deploys with runtime build metadata such as
-  `0.1.0+build.<run>.<sha>` but does not create a GitHub release.
-- Deployment fails unless `/livez` reports the exact runtime version and `/readyz` confirms the
-  validated private API readiness contract.
-
-Supported release commits:
-
-```text
-feat:      minor
-fix:       patch
-perf:      patch
-security:  patch
-revert:    patch
-<type>!:   major
-BREAKING CHANGE: major
-```
+The verification workflow produces an immutable exact-SHA bundle. The deployment workflow uploads
+that prebuilt bundle at zero traffic, verifies it using a version override, and promotes it through
+5%, 25%, and 100% traffic with automatic rollback on failure. Credential rotation is isolated in a
+protected infrastructure workflow.
 
 ## Project structure
 
 ```text
 oz-erp-edge/
-|-- .github/workflows/deploy.yml
+|-- .github/workflows/
+|   |-- ci.yml
+|   |-- deploy.yml
+|   `-- infra.yml
 |-- src/
 |   |-- config.ts
 |   |-- cors.ts
@@ -215,14 +213,8 @@ oz-erp-edge/
 |   |-- request-context.ts
 |   |-- route-policy.ts
 |   `-- security.ts
-|-- tests/
-|   |-- config.test.ts
-|   |-- cors.test.ts
-|   |-- health.test.ts
-|   |-- proxy.test.ts
-|   `-- security.test.ts
 |-- package-lock.json
 |-- package.json
-|-- wrangler.toml
+|-- wrangler.jsonc
 `-- README.md
 ```

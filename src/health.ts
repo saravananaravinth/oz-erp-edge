@@ -186,6 +186,7 @@ export function livez(context: HonoContext): Response {
   const config = context.get('workerConfig');
   const requestContext = context.get('requestContext');
   const timestamp = new Date().toISOString();
+  const version = context.env.CF_VERSION_METADATA?.tag ?? config.APP_VERSION;
 
   return new Response(
     JSON.stringify({
@@ -193,7 +194,7 @@ export function livez(context: HonoContext): Response {
       data: {
         service: config.APP_NAME,
         status: 'alive',
-        version: config.APP_VERSION,
+        version,
         environment: config.APP_ENV,
         cloud_run_auth_mode: resolveCloudRunAuthMode(config),
         timestamp,

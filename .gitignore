@@ -21,12 +21,14 @@ tmp/
 .dev.vars
 .dev.vars.*
 wrangler-debug.log
+worker-startup.cpuprofile
 
 # Environment files
 .env
 .env.*
 !.env.example
 !.dev.vars.example
+.dev.vars.example
 
 # Secrets / credentials
 *.pem
