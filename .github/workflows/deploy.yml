@@ -593,7 +593,7 @@ jobs:
 
     env:
       NODE_VERSION: "24"
-      NPM_VERSION: "11.16.0"
+      NPM_VERSION: "12.0.1"
       WORKER_NAME: oz-erp-edge
       WORKER_ROUTE: api.erp.ozotecev.com/*
       WORKER_ORIGIN: https://api.erp.ozotecev.com
@@ -914,57 +914,84 @@ jobs:
           set -euo pipefail
 
           upload_log="$(mktemp)"
-          versions_file="$(mktemp)"
-          trap 'rm -f "${upload_log}" "${versions_file}"' EXIT
+          wrangler_output_file="$(mktemp)"
+          trap 'rm -f "${upload_log}" "${wrangler_output_file}"' EXIT
 
-          npx wrangler versions upload \
-            --config "${WRANGLER_RELEASE_CONFIG}" \
-            --tag "${WORKER_VERSION_TAG}" \
-            --message "oz-erp-edge ${APP_VERSION} from ${GITHUB_SHA}" \
-            --strict \
-            | tee "${upload_log}"
+          WRANGLER_OUTPUT_FILE_PATH="${wrangler_output_file}" \
+            npx wrangler versions upload \
+              --config "${WRANGLER_RELEASE_CONFIG}" \
+              --tag "${WORKER_VERSION_TAG}" \
+              --message "oz-erp-edge ${APP_VERSION} from ${GITHUB_SHA}" \
+              --strict \
+              | tee "${upload_log}"
 
-          npx wrangler versions list \
-            --config "${WRANGLER_RELEASE_CONFIG}" \
-            --json \
-            > "${versions_file}"
-
-          VERSIONS_FILE="${versions_file}" node --input-type=module <<'NODE'
+          WRANGLER_OUTPUT_FILE="${wrangler_output_file}" \
+          EXPECTED_WORKER_NAME="${WORKER_NAME}" \
+          node --input-type=module <<'NODE'
           import fs from 'node:fs';
 
-          const data = JSON.parse(fs.readFileSync(process.env.VERSIONS_FILE, 'utf8'));
-          const matches = [];
+          const outputFile = process.env.WRANGLER_OUTPUT_FILE;
+          const expectedWorkerName = process.env.EXPECTED_WORKER_NAME;
 
-          function walk(value) {
-            if (Array.isArray(value)) {
-              for (const item of value) {
-                walk(item);
+          if (typeof outputFile !== 'string' || outputFile.length === 0) {
+            throw new Error('WRANGLER_OUTPUT_FILE is required.');
+          }
+
+          const raw = fs.readFileSync(outputFile, 'utf8');
+          const records = raw
+            .split(/\r?\n/u)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+            .map((line, index) => {
+              try {
+                return JSON.parse(line);
+              } catch (error) {
+                throw new Error(`Invalid Wrangler ND-JSON output at line ${index + 1}.`, {
+                  cause: error,
+                });
               }
-              return;
+            });
+
+          const versionUploadEvents = records.filter(
+            (record) =>
+              typeof record === 'object' &&
+              record !== null &&
+              !Array.isArray(record) &&
+              record.type === 'version-upload',
+          );
+
+          const versionIds = new Set();
+
+          for (const event of versionUploadEvents) {
+            const workerName = event.worker_name ?? event.workerName;
+            if (
+              typeof workerName === 'string' &&
+              typeof expectedWorkerName === 'string' &&
+              workerName !== expectedWorkerName
+            ) {
+              continue;
             }
 
-            if (typeof value !== 'object' || value === null) {
-              return;
-            }
-
-            const tag = value.tag ?? value.version_tag ?? value.versionTag;
-            const id = value.id ?? value.version_id ?? value.versionId;
-            if (tag === process.env.WORKER_VERSION_TAG && typeof id === 'string' && /^[0-9a-fA-F-]{36}$/u.test(id)) {
-              matches.push(id);
-            }
-
-            for (const child of Object.values(value)) {
-              walk(child);
+            const versionId = event.version_id ?? event.versionId;
+            if (
+              typeof versionId === 'string' &&
+              /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u.test(versionId)
+            ) {
+              versionIds.add(versionId);
             }
           }
 
-          walk(data);
-          const uniqueMatches = [...new Set(matches)];
-          if (uniqueMatches.length !== 1) {
-            throw new Error(`Expected exactly one uploaded Worker version tagged ${process.env.WORKER_VERSION_TAG}.`);
+          const candidateVersionIds = [...versionIds];
+          if (candidateVersionIds.length !== 1) {
+            throw new Error(
+              `Expected exactly one structured version-upload event, received ${candidateVersionIds.length}.`,
+            );
           }
 
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `candidate_version_id=${uniqueMatches[0]}\n`);
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `candidate_version_id=${candidateVersionIds[0]}\n`,
+          );
           NODE
 
       - name: Canary and promote candidate
