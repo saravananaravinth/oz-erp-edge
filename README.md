@@ -1,6 +1,6 @@
 # oz-erp-edge
 
-Enterprise Cloudflare Hono Worker gateway for the private `oz-erp-api` Cloud Run service.
+Enterprise Cloudflare Hono Worker gateway for the private server `oz-erp-api` Cloud Run service.
 
 The Worker is the only public API boundary. It applies edge-safe controls and invokes Cloud Run with
 a Google ID token while preserving the end-user Bearer token for backend authentication. It does not
