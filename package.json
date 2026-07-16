@@ -21,8 +21,8 @@
     "format:check": "prettier . --check",
     "audit:prod": "npm audit --omit=dev --audit-level=high",
     "verify": "npm run cf:typegen:check && npm run typecheck && npm run lint && npm run format:check && npm run build && npm run audit:prod",
-    "cf:typegen": "wrangler types src/worker-configuration.d.ts",
-    "cf:typegen:check": "wrangler types src/worker-configuration.d.ts --check",
+    "cf:typegen": "wrangler types src/worker-configuration.d.ts --env-file /dev/null",
+    "cf:typegen:check": "npm run cf:typegen && git diff --exit-code -- src/worker-configuration.d.ts",
     "cf:startup": "wrangler check startup"
   },
   "dependencies": {
