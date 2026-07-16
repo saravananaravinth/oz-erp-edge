@@ -1,81 +1,1429 @@
-name: Deploy verified Edge version
+name: Deploy oz-erp-edge to Cloudflare Workers
+
+run-name: Deploy oz-erp-edge @ ${{ github.sha }}
 
 on:
-  workflow_run:
-    workflows: ["Verify immutable Edge bundle"]
-    types: [completed]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release type override. Use auto for Conventional Commit based versioning."
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+          - none
 
 concurrency:
   group: oz-erp-edge-production
   cancel-in-progress: false
 
 permissions:
-  actions: read
   contents: read
 
 jobs:
-  deploy:
-    if:
-      github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch ==
-      'main'
+  verify_plan:
+    name: Verify source and plan deployment
     runs-on: ubuntu-24.04
-    environment: production
-    timeout-minutes: 10
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+
+    outputs:
+      release_required: ${{ steps.release_meta.outputs.release_required }}
+      release_type: ${{ steps.release_meta.outputs.release_type }}
+      base_version: ${{ steps.release_meta.outputs.base_version }}
+      package_version: ${{ steps.release_meta.outputs.package_version }}
+      app_version: ${{ steps.release_meta.outputs.app_version }}
+      worker_version_tag: ${{ steps.release_meta.outputs.worker_version_tag }}
+      short_sha: ${{ steps.release_meta.outputs.short_sha }}
+      previous_tag: ${{ steps.release_meta.outputs.previous_tag }}
+      commit_range: ${{ steps.release_meta.outputs.commit_range }}
+      release_tag: ${{ steps.release_meta.outputs.release_tag }}
+      release_title: ${{ steps.release_meta.outputs.release_title }}
+
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      NODE_VERSION: "24"
+      NPM_VERSION: "11.16.0"
+      RELEASE_NAME: oz-erp-edge
+      REQUESTED_RELEASE_TYPE: >-
+        ${{ github.event_name == 'workflow_dispatch' && inputs.release_type || 'auto' }}
+
     steps:
-      - name: Download exact verified bundle
+      - name: Checkout exact commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify checkout revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ "${checked_out_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "::error title=Unexpected checkout revision::Expected ${GITHUB_SHA}, received ${checked_out_sha}."
+            exit 1
+          fi
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+          package-manager-cache: true
+
+      - name: Pin npm toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm install --global "npm@${NPM_VERSION}"
+          actual_npm_version="$(npm --version)"
+
+          if [[ "${actual_npm_version}" != "${NPM_VERSION}" ]]; then
+            echo "::error title=Unexpected npm version::Expected npm ${NPM_VERSION}, received ${actual_npm_version}."
+            exit 1
+          fi
+
+      - name: Validate repository and production manifest contract
+        shell: bash
+        env:
+          EXPECTED_WORKER_NAME: oz-erp-edge
+          EXPECTED_WORKER_ROUTE: api.erp.ozotecev.com/*
+          EXPECTED_ZONE_NAME: ozotecev.com
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            package.json
+            package-lock.json
+            tsconfig.json
+            eslint.config.js
+            prettier.config.js
+            wrangler.jsonc
+            src/index.ts
+            src/config.ts
+            src/proxy.ts
+            src/route-policy.ts
+            src/health.ts
+          )
+
+          for required_file in "${required_files[@]}"; do
+            if [[ ! -f "${required_file}" ]]; then
+              echo "::error title=Missing repository file::${required_file} is required."
+              exit 1
+            fi
+          done
+
+          if find . -maxdepth 3 -type f \( \
+            -name '*.pem' -o \
+            -name '*.key' -o \
+            -name '*service-account*.json' -o \
+            -name '*service_account*.json' -o \
+            -name '.dev.vars' -o \
+            -name '.env' \
+          \) -not -path './node_modules/*' -print -quit | grep -q .; then
+            echo "::error title=Potential secret file committed::Remove private keys, service-account files, .dev.vars, and .env files from the repository."
+            exit 1
+          fi
+
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          function parseJsonc(filePath) {
+            const source = fs.readFileSync(filePath, 'utf8');
+            let withoutComments = '';
+            let inString = false;
+            let escaped = false;
+            let lineComment = false;
+            let blockComment = false;
+
+            for (let index = 0; index < source.length; index += 1) {
+              const current = source[index];
+              const next = source[index + 1];
+
+              if (lineComment) {
+                if (current === '\n') {
+                  lineComment = false;
+                  withoutComments += current;
+                }
+                continue;
+              }
+
+              if (blockComment) {
+                if (current === '*' && next === '/') {
+                  blockComment = false;
+                  index += 1;
+                } else if (current === '\n') {
+                  withoutComments += '\n';
+                }
+                continue;
+              }
+
+              if (inString) {
+                withoutComments += current;
+                if (escaped) {
+                  escaped = false;
+                } else if (current === '\\') {
+                  escaped = true;
+                } else if (current === '"') {
+                  inString = false;
+                }
+                continue;
+              }
+
+              if (current === '"') {
+                inString = true;
+                withoutComments += current;
+                continue;
+              }
+
+              if (current === '/' && next === '/') {
+                lineComment = true;
+                index += 1;
+                continue;
+              }
+
+              if (current === '/' && next === '*') {
+                blockComment = true;
+                index += 1;
+                continue;
+              }
+
+              withoutComments += current;
+            }
+
+            let normalized = '';
+            inString = false;
+            escaped = false;
+
+            for (let index = 0; index < withoutComments.length; index += 1) {
+              const current = withoutComments[index];
+
+              if (inString) {
+                normalized += current;
+                if (escaped) {
+                  escaped = false;
+                } else if (current === '\\') {
+                  escaped = true;
+                } else if (current === '"') {
+                  inString = false;
+                }
+                continue;
+              }
+
+              if (current === '"') {
+                inString = true;
+                normalized += current;
+                continue;
+              }
+
+              if (current === ',') {
+                let lookahead = index + 1;
+                while (/\s/u.test(withoutComments[lookahead] ?? '')) {
+                  lookahead += 1;
+                }
+                if (withoutComments[lookahead] === '}' || withoutComments[lookahead] === ']') {
+                  continue;
+                }
+              }
+
+              normalized += current;
+            }
+
+            return JSON.parse(normalized);
+          }
+
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const config = parseJsonc('wrangler.jsonc');
+          const rootLock = packageLock?.packages?.[''];
+
+          if (packageJson.name !== 'oz-erp-edge' || packageJson.private !== true || packageJson.type !== 'module') {
+            throw new Error('package.json must identify the private ESM package oz-erp-edge.');
+          }
+
+          if (packageJson.packageManager !== `npm@${process.env.NPM_VERSION}`) {
+            throw new Error(`packageManager must be npm@${process.env.NPM_VERSION}.`);
+          }
+
+          if (packageLock.lockfileVersion !== 3 || typeof rootLock !== 'object' || rootLock === null) {
+            throw new Error('package-lock.json must use lockfileVersion 3 and contain the root package record.');
+          }
+
+          for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+            const declared = packageJson[section] ?? {};
+            const locked = rootLock[section] ?? {};
+            if (JSON.stringify(declared) !== JSON.stringify(locked)) {
+              throw new Error(`${section} in package-lock.json is not synchronized with package.json.`);
+            }
+          }
+
+          for (const scriptName of ['verify', 'cf:typegen:check', 'typecheck', 'lint', 'format:check', 'build', 'audit:prod', 'cf:startup']) {
+            if (typeof packageJson.scripts?.[scriptName] !== 'string' || packageJson.scripts[scriptName].trim().length === 0) {
+              throw new Error(`package.json script ${scriptName} is required.`);
+            }
+          }
+
+          if (Object.prototype.hasOwnProperty.call(packageJson.scripts ?? {}, 'test')) {
+            throw new Error('The deployment contract does not include an automated test script; remove stale test execution from the workflow instead.');
+          }
+
+          if (config.name !== process.env.EXPECTED_WORKER_NAME) {
+            throw new Error(`wrangler.jsonc name must be ${process.env.EXPECTED_WORKER_NAME}.`);
+          }
+          if (config.main !== 'src/index.ts') {
+            throw new Error('wrangler.jsonc main must be src/index.ts.');
+          }
+          if (config.workers_dev !== false) {
+            throw new Error('workers_dev must be false in production.');
+          }
+          if (config.minify !== true) {
+            throw new Error('minify must be enabled in production.');
+          }
+          if (config.placement?.region !== 'gcp:asia-south1') {
+            throw new Error('Worker placement must remain aligned to gcp:asia-south1.');
+          }
+          if (config.version_metadata?.binding !== 'CF_VERSION_METADATA') {
+            throw new Error('CF_VERSION_METADATA binding is required for release verification.');
+          }
+
+          const routes = Array.isArray(config.routes) ? config.routes : [];
+          const expectedRoute = routes.some(
+            (route) => route?.pattern === process.env.EXPECTED_WORKER_ROUTE && route?.zone_name === process.env.EXPECTED_ZONE_NAME,
+          );
+          if (!expectedRoute || routes.length !== 1) {
+            throw new Error('wrangler.jsonc must expose only the approved production route.');
+          }
+
+          if (config.observability?.enabled !== true || config.observability?.logs?.enabled !== true || config.observability?.traces?.enabled !== true) {
+            throw new Error('Production logs and traces must remain enabled.');
+          }
+
+          const vars = config.vars;
+          if (typeof vars !== 'object' || vars === null || Array.isArray(vars)) {
+            throw new Error('wrangler.jsonc vars must be an object.');
+          }
+
+          const exactValues = {
+            APP_ENV: 'production',
+            APP_NAME: 'oz-erp-edge',
+            PUBLIC_API_PREFIX: '',
+            BACKEND_PATH_PREFIX: '',
+            BACKEND_READINESS_PATH: '/erp/readyz',
+            ALLOWED_BACKEND_PREFIXES: '/erp',
+            CORS_ALLOW_CREDENTIALS: 'false',
+            REQUIRE_ORIGIN_ON_MUTATION: 'true',
+            MAX_BODY_BYTES: '1048576',
+            CLOUD_RUN_AUTH_MODE: 'id_token',
+            GOOGLE_TOKEN_URI: 'https://oauth2.googleapis.com/token',
+          };
+
+          for (const [key, expected] of Object.entries(exactValues)) {
+            if (vars[key] !== expected) {
+              throw new Error(`${key} must be ${JSON.stringify(expected)} in production.`);
+            }
+          }
+
+          if (vars.CLOUD_RUN_BASE_URL !== vars.CLOUD_RUN_AUDIENCE) {
+            throw new Error('CLOUD_RUN_BASE_URL and CLOUD_RUN_AUDIENCE must be identical.');
+          }
+
+          const backendUrl = new URL(vars.CLOUD_RUN_BASE_URL);
+          if (backendUrl.protocol !== 'https:' || !backendUrl.hostname.endsWith('.run.app')) {
+            throw new Error('CLOUD_RUN_BASE_URL must be an HTTPS Cloud Run service origin.');
+          }
+
+          const origins = String(vars.ALLOWED_ORIGINS ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+          if (origins.length === 0 || origins.includes('*')) {
+            throw new Error('Production ALLOWED_ORIGINS must be an explicit non-empty allowlist.');
+          }
+          for (const origin of origins) {
+            const parsed = new URL(origin);
+            if (parsed.protocol !== 'https:' || parsed.origin !== origin || parsed.pathname !== '/') {
+              throw new Error(`Invalid production origin: ${origin}`);
+            }
+          }
+
+          const blocked = new Set(String(vars.BLOCKED_BACKEND_PREFIXES ?? '').split(',').map((value) => value.trim()).filter(Boolean));
+          for (const requiredPath of [
+            '/tasks', '/metrics', '/readyz', '/healthz', '/livez', '/version',
+            '/erp/metrics', '/erp/readyz', '/erp/healthz', '/erp/livez', '/erp/version',
+          ]) {
+            if (!blocked.has(requiredPath)) {
+              throw new Error(`BLOCKED_BACKEND_PREFIXES is missing ${requiredPath}.`);
+            }
+          }
+
+          const exposedHeaders = new Set(String(vars.EXPOSED_HEADERS ?? '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
+          for (const requiredHeader of ['x-request-id', 'x-correlation-id', 'retry-after', 'x-ratelimit-limit', 'x-ratelimit-remaining']) {
+            if (!exposedHeaders.has(requiredHeader)) {
+              throw new Error(`EXPOSED_HEADERS is missing ${requiredHeader}.`);
+            }
+          }
+
+          const serializedConfig = JSON.stringify(config);
+          for (const forbiddenSecretName of [
+            'GCP_SERVICE_ACCOUNT_JSON_B64',
+            'CLOUDFLARE_API_TOKEN',
+            'CLOUDFLARE_ACCOUNT_ID',
+          ]) {
+            if (serializedConfig.includes(forbiddenSecretName)) {
+              throw new Error(`${forbiddenSecretName} must not be stored in wrangler.jsonc.`);
+            }
+          }
+          NODE
+
+      - name: Install dependencies from lockfile
+        shell: bash
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify application
+        shell: bash
+        run: npm run verify
+
+      - name: Validate Worker startup limits
+        shell: bash
+        run: npm run cf:startup
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run:
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "edge-bundle-$SHA" --dir
-          artifact
-      - name: Validate artifact identity
-        env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          test "$(jq -r .sha artifact/edge-artifact.json)" = "$SHA"
-          test -s artifact/index.js
-          test -s artifact/wrangler.jsonc
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        with:
-          node-version: "24"
-          package-manager-cache: false
-      - name: Install pinned deployment client only
-        run: npm install --global wrangler@4.110.0
-      - name: Upload prebuilt version at zero traffic
-        id: upload
-        working-directory: artifact
-        run: |
-          set -euo pipefail
-          version="$(jq -r .version edge-artifact.json)"
-          wrangler versions upload index.js --no-bundle --config wrangler.jsonc --tag "$version" --strict
-          versions="$(wrangler versions list --name oz-erp-edge --json)"
-          id="$(jq -r --arg tag "$version" '[.[] | select((.tag // .metadata.tag // .annotations["workers/tag"]) == $tag)][0].id // empty' <<< "$versions")"
-          [[ "$id" =~ ^[0-9a-f-]{36}$ ]]
-          echo "version_id=$id" >> "$GITHUB_OUTPUT"
-      - name: Verify with version override and promote
-        env:
-          NEW_VERSION: ${{ steps.upload.outputs.version_id }}
-        run: |
-          set -euo pipefail
-          current_json="$(wrangler deployments status --name oz-erp-edge --json)"
-          OLD_VERSION="$(jq -r '.versions | max_by(.percentage) | .version_id' <<< "$current_json")"
-          rollback() { wrangler versions deploy "$OLD_VERSION@100%" --name oz-erp-edge -y; }
-          trap rollback ERR
-          wrangler versions deploy "$OLD_VERSION@100%" "$NEW_VERSION@0%" --name oz-erp-edge -y
-          curl --fail --silent --show-error --retry 3 -H "Cloudflare-Workers-Version-Overrides: oz-erp-edge=$NEW_VERSION" https://api.erp.ozotecev.com/livez >/dev/null
-          for percent in 5 25 100; do
-            old=$((100-percent))
-            if [[ "$percent" -eq 100 ]]; then
-              wrangler versions deploy "$NEW_VERSION@100%" --name oz-erp-edge -y
-            else
-              wrangler versions deploy "$OLD_VERSION@$old%" "$NEW_VERSION@$percent%" --name oz-erp-edge -y
+
+          package_json_version="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          if [[ ! "${package_json_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Invalid package version::package.json version must be SemVer major.minor.patch."
+            exit 1
+          fi
+
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          requested_release_type="${REQUESTED_RELEASE_TYPE:-auto}"
+
+          case "${requested_release_type}" in
+            auto|patch|minor|major|none) ;;
+            *)
+              echo "::error title=Invalid release type::release_type must be auto, patch, minor, major, or none."
+              exit 1
+              ;;
+          esac
+
+          release_records_file="$(mktemp)"
+          versions_file="$(mktemp)"
+          trap 'rm -f "${release_records_file}" "${versions_file}"' EXIT
+
+          gh release list \
+            --limit 500 \
+            --json tagName,name \
+            --jq '.[] | [.tagName, .name] | @tsv' \
+            > "${release_records_file}"
+
+          {
+            git tag --list "${RELEASE_NAME}-v*" || true
+            awk -F '\t' '{ print $1; print $2 }' "${release_records_file}" || true
+          } | awk -v release_name="${RELEASE_NAME}" '
+            function emit(value, tag_prefix, title_prefix) {
+              if (index(value, tag_prefix) == 1) {
+                candidate = substr(value, length(tag_prefix) + 1)
+                if (match(candidate, /^[0-9]+\.[0-9]+\.[0-9]+/)) {
+                  print substr(candidate, RSTART, RLENGTH)
+                }
+              }
+              if (index(value, title_prefix) == 1) {
+                candidate = substr(value, length(title_prefix) + 1)
+                if (match(candidate, /^[0-9]+\.[0-9]+\.[0-9]+$/)) {
+                  print candidate
+                }
+              }
+            }
+            {
+              emit($0, release_name "-v", release_name " v")
+            }
+          ' | sed '/^$/d' | sort -Vu | uniq > "${versions_file}"
+
+          base_version="$(tail -n 1 "${versions_file}")"
+          first_release=false
+          if [[ -z "${base_version}" ]]; then
+            base_version="${package_json_version}"
+            first_release=true
+          fi
+
+          previous_tag=""
+          if [[ "${first_release}" == "false" ]]; then
+            previous_tag="$(git tag --list "${RELEASE_NAME}-v${base_version}*" | sort -V | tail -n 1 || true)"
+            if [[ -z "${previous_tag}" ]]; then
+              previous_tag="$(awk -F '\t' -v stable_prefix="${RELEASE_NAME}-v${base_version}" -v title="${RELEASE_NAME} v${base_version}" '
+                $1 == stable_prefix || index($1, stable_prefix "-") == 1 || $2 == title { print $1; exit }
+              ' "${release_records_file}" || true)"
             fi
-            curl --fail --silent --show-error --retry 3 https://api.erp.ozotecev.com/livez >/dev/null
+          fi
+
+          commit_range=""
+          if [[ -n "${previous_tag}" ]] && git rev-parse -q --verify "${previous_tag}^{commit}" >/dev/null; then
+            commit_range="${previous_tag}..HEAD"
+          fi
+
+          git_log_args=()
+          if [[ -n "${commit_range}" ]]; then
+            git_log_args+=("${commit_range}")
+          fi
+
+          commit_messages="$(git log "${git_log_args[@]}" --pretty=%B --no-merges)"
+
+          release_type="none"
+          if [[ "${requested_release_type}" == "none" ]]; then
+            release_type="none"
+          elif [[ "${requested_release_type}" != "auto" ]]; then
+            release_type="${requested_release_type}"
+          elif printf '%s\n' "${commit_messages}" | grep -Eq '(^BREAKING CHANGE:|^BREAKING-CHANGE:|^[a-zA-Z][a-zA-Z0-9-]*(\([^)]+\))?!:)'; then
+            release_type="major"
+          elif printf '%s\n' "${commit_messages}" | grep -Eq '^feat(\([^)]+\))?:'; then
+            release_type="minor"
+          elif printf '%s\n' "${commit_messages}" | grep -Eq '^(fix|perf|security|revert)(\([^)]+\))?:'; then
+            release_type="patch"
+          fi
+
+          release_required=false
+          package_version="${base_version}"
+          release_tag=""
+          release_title=""
+
+          if [[ "${release_type}" != "none" ]]; then
+            IFS='.' read -r current_major current_minor current_patch <<< "${base_version}"
+
+            if [[ "${first_release}" == "true" ]]; then
+              package_version="${base_version}"
+            elif [[ "${release_type}" == "major" ]]; then
+              package_version="$((current_major + 1)).0.0"
+            elif [[ "${release_type}" == "minor" ]]; then
+              package_version="${current_major}.$((current_minor + 1)).0"
+            else
+              package_version="${current_major}.${current_minor}.$((current_patch + 1))"
+            fi
+
+            release_required=true
+            release_tag="${RELEASE_NAME}-v${package_version}"
+            release_title="${RELEASE_NAME} v${package_version}"
+
+            if gh release view "${release_tag}" >/dev/null 2>&1; then
+              echo "::error title=Release already exists::${release_tag} already exists. Create a new commit or use release_type=none."
+              exit 1
+            fi
+
+            if git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null; then
+              echo "::error title=Tag already exists::${release_tag} already exists in Git."
+              exit 1
+            fi
+
+            existing_release_titles="$(awk -F '\t' '{ print $2 }' "${release_records_file}" || true)"
+            if printf '%s\n' "${existing_release_titles}" | grep -Fxq "${release_title}"; then
+              echo "::error title=Release title already exists::${release_title} already exists."
+              exit 1
+            fi
+
+            app_version="${package_version}"
+            worker_version_tag="v${package_version}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-${short_sha}"
+          else
+            app_version="${base_version}+build.${GITHUB_RUN_NUMBER}.${short_sha}"
+            worker_version_tag="b-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-${short_sha}"
+          fi
+
+          {
+            echo "release_required=${release_required}"
+            echo "release_type=${release_type}"
+            echo "base_version=${base_version}"
+            echo "package_version=${package_version}"
+            echo "app_version=${app_version}"
+            echo "worker_version_tag=${worker_version_tag}"
+            echo "short_sha=${short_sha}"
+            echo "previous_tag=${previous_tag}"
+            echo "commit_range=${commit_range}"
+            echo "release_tag=${release_tag}"
+            echo "release_title=${release_title}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verification summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## oz-erp-edge verification"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Commit | ${GITHUB_SHA} |"
+            echo "| Release type | ${{ steps.release_meta.outputs.release_type }} |"
+            echo "| Base version | ${{ steps.release_meta.outputs.base_version }} |"
+            echo "| Runtime version | ${{ steps.release_meta.outputs.app_version }} |"
+            echo "| Worker version tag | ${{ steps.release_meta.outputs.worker_version_tag }} |"
+            echo "| GitHub release required | ${{ steps.release_meta.outputs.release_required }} |"
+            echo
+            echo "Verification completed with generated binding checks, strict TypeScript, ESLint, Prettier, Wrangler dry-run build, production dependency audit, and Worker startup validation."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  deploy_production:
+    name: Upload, canary, and promote production version
+    needs: verify_plan
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 45
+
+    permissions:
+      contents: read
+
+    outputs:
+      candidate_version_id: ${{ steps.upload.outputs.candidate_version_id }}
+      previous_version_id: ${{ steps.current_deployment.outputs.previous_version_id }}
+      worker_version_tag: ${{ needs.verify_plan.outputs.worker_version_tag }}
+
+    env:
+      NODE_VERSION: "24"
+      NPM_VERSION: "11.16.0"
+      WORKER_NAME: oz-erp-edge
+      WORKER_ROUTE: api.erp.ozotecev.com/*
+      WORKER_ORIGIN: https://api.erp.ozotecev.com
+      WRANGLER_RELEASE_CONFIG: .wrangler.release.json
+      CANARY_DWELL_SECONDS: "20"
+      APP_VERSION: ${{ needs.verify_plan.outputs.app_version }}
+      WORKER_VERSION_TAG: ${{ needs.verify_plan.outputs.worker_version_tag }}
+      SHORT_SHA: ${{ needs.verify_plan.outputs.short_sha }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify checkout revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ "${checked_out_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "::error title=Unexpected checkout revision::Expected ${GITHUB_SHA}, received ${checked_out_sha}."
+            exit 1
+          fi
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+          package-manager-cache: true
+
+      - name: Pin npm toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global "npm@${NPM_VERSION}"
+          [[ "$(npm --version)" == "${NPM_VERSION}" ]]
+
+      - name: Install dependencies from lockfile
+        shell: bash
+        run: npm ci --no-audit --no-fund
+
+      - name: Re-verify deployment source
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run verify
+          npm run cf:startup
+
+      - name: Validate Cloudflare deployment credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for key in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN; do
+            if [[ -z "${!key:-}" ]]; then
+              echo "::error title=Missing deployment secret::${key} is not configured in the protected production environment."
+              exit 1
+            fi
           done
+
+          if [[ ! "${CLOUDFLARE_ACCOUNT_ID}" =~ ^[0-9a-fA-F]{32}$ ]]; then
+            echo "::error title=Invalid Cloudflare account ID::CLOUDFLARE_ACCOUNT_ID must be a 32-character hexadecimal identifier."
+            exit 1
+          fi
+
+      - name: Create immutable release configuration
+        id: release_config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          function parseJsonc(filePath) {
+            const source = fs.readFileSync(filePath, 'utf8');
+            let output = '';
+            let inString = false;
+            let escaped = false;
+            let lineComment = false;
+            let blockComment = false;
+
+            for (let index = 0; index < source.length; index += 1) {
+              const current = source[index];
+              const next = source[index + 1];
+
+              if (lineComment) {
+                if (current === '\n') {
+                  lineComment = false;
+                  output += current;
+                }
+                continue;
+              }
+
+              if (blockComment) {
+                if (current === '*' && next === '/') {
+                  blockComment = false;
+                  index += 1;
+                } else if (current === '\n') {
+                  output += '\n';
+                }
+                continue;
+              }
+
+              if (inString) {
+                output += current;
+                if (escaped) {
+                  escaped = false;
+                } else if (current === '\\') {
+                  escaped = true;
+                } else if (current === '"') {
+                  inString = false;
+                }
+                continue;
+              }
+
+              if (current === '"') {
+                inString = true;
+                output += current;
+                continue;
+              }
+
+              if (current === '/' && next === '/') {
+                lineComment = true;
+                index += 1;
+                continue;
+              }
+
+              if (current === '/' && next === '*') {
+                blockComment = true;
+                index += 1;
+                continue;
+              }
+
+              output += current;
+            }
+
+            let normalized = '';
+            inString = false;
+            escaped = false;
+
+            for (let index = 0; index < output.length; index += 1) {
+              const current = output[index];
+
+              if (inString) {
+                normalized += current;
+                if (escaped) {
+                  escaped = false;
+                } else if (current === '\\') {
+                  escaped = true;
+                } else if (current === '"') {
+                  inString = false;
+                }
+                continue;
+              }
+
+              if (current === '"') {
+                inString = true;
+                normalized += current;
+                continue;
+              }
+
+              if (current === ',') {
+                let lookahead = index + 1;
+                while (/\s/u.test(output[lookahead] ?? '')) {
+                  lookahead += 1;
+                }
+                if (output[lookahead] === '}' || output[lookahead] === ']') {
+                  continue;
+                }
+              }
+
+              normalized += current;
+            }
+
+            return JSON.parse(normalized);
+          }
+
+          const appVersion = process.env.APP_VERSION;
+          if (typeof appVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(appVersion)) {
+            throw new Error('APP_VERSION must be valid semantic version metadata.');
+          }
+
+          const config = parseJsonc('wrangler.jsonc');
+          if (typeof config.vars !== 'object' || config.vars === null || Array.isArray(config.vars)) {
+            throw new Error('wrangler.jsonc vars must be an object.');
+          }
+
+          config.vars.APP_VERSION = appVersion;
+          fs.writeFileSync(process.env.WRANGLER_RELEASE_CONFIG, `${JSON.stringify(config, null, 2)}\n`, {
+            mode: 0o600,
+          });
+          NODE
+
+          npx wrangler deploy \
+            --config "${WRANGLER_RELEASE_CONFIG}" \
+            --dry-run \
+            --strict \
+            --outdir dist-release
+
+      - name: Validate required Worker secret
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          secret_output="$(mktemp)"
+          trap 'rm -f "${secret_output}"' EXIT
+
+          npx wrangler secret list \
+            --config "${WRANGLER_RELEASE_CONFIG}" \
+            > "${secret_output}"
+
+          SECRET_OUTPUT="${secret_output}" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const raw = fs.readFileSync(process.env.SECRET_OUTPUT, 'utf8');
+          const start = raw.indexOf('[');
+          const end = raw.lastIndexOf(']');
+          if (start < 0 || end < start) {
+            throw new Error('Wrangler did not return a parseable secret list.');
+          }
+
+          const secrets = JSON.parse(raw.slice(start, end + 1));
+          const names = new Set(secrets.map((entry) => entry?.name).filter((name) => typeof name === 'string'));
+          if (!names.has('GCP_SERVICE_ACCOUNT_JSON_B64')) {
+            throw new Error('Required Worker secret GCP_SERVICE_ACCOUNT_JSON_B64 is not configured.');
+          }
+          NODE
+
+      - name: Capture current stable deployment
+        id: current_deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status_file="$(mktemp)"
+          trap 'rm -f "${status_file}"' EXIT
+
+          npx wrangler deployments status \
+            --config "${WRANGLER_RELEASE_CONFIG}" \
+            --json \
+            > "${status_file}"
+
+          STATUS_FILE="${status_file}" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const data = JSON.parse(fs.readFileSync(process.env.STATUS_FILE, 'utf8'));
+          const versions = new Map();
+
+          function addVersion(value, allowGenericId = false) {
+            if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+              return;
+            }
+
+            const id = value.version_id ?? value.versionId ?? (allowGenericId ? value.id : undefined);
+            const rawPercentage = value.percentage ?? value.traffic_percentage ?? value.trafficPercentage;
+            const percentage = typeof rawPercentage === 'number' ? rawPercentage : Number(rawPercentage);
+
+            if (typeof id === 'string' && /^[0-9a-fA-F-]{36}$/u.test(id) && Number.isFinite(percentage)) {
+              versions.set(id, Math.max(versions.get(id) ?? 0, percentage));
+            }
+          }
+
+          function walk(value) {
+            if (Array.isArray(value)) {
+              for (const item of value) {
+                walk(item);
+              }
+              return;
+            }
+
+            if (typeof value !== 'object' || value === null) {
+              return;
+            }
+
+            addVersion(value, false);
+
+            for (const [key, child] of Object.entries(value)) {
+              if (key === 'versions') {
+                if (Array.isArray(child)) {
+                  for (const item of child) {
+                    addVersion(item, true);
+                  }
+                } else if (typeof child === 'object' && child !== null) {
+                  for (const item of Object.values(child)) {
+                    addVersion(item, true);
+                  }
+                }
+              }
+              walk(child);
+            }
+          }
+
+          walk(data);
+          const positive = [...versions.entries()].filter(([, percentage]) => percentage > 0.0001);
+          const stable = positive.filter(([, percentage]) => Math.abs(percentage - 100) < 0.0001);
+
+          if (positive.length !== 1 || stable.length !== 1) {
+            throw new Error('Production must have exactly one stable Worker version at 100% before an automated rollout begins.');
+          }
+
+          const [versionId] = stable[0];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `previous_version_id=${versionId}\n`);
+          NODE
+
+      - name: Upload candidate Worker version
+        id: upload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          upload_log="$(mktemp)"
+          versions_file="$(mktemp)"
+          trap 'rm -f "${upload_log}" "${versions_file}"' EXIT
+
+          npx wrangler versions upload \
+            --config "${WRANGLER_RELEASE_CONFIG}" \
+            --tag "${WORKER_VERSION_TAG}" \
+            --message "oz-erp-edge ${APP_VERSION} from ${GITHUB_SHA}" \
+            --strict \
+            | tee "${upload_log}"
+
+          npx wrangler versions list \
+            --config "${WRANGLER_RELEASE_CONFIG}" \
+            --json \
+            > "${versions_file}"
+
+          VERSIONS_FILE="${versions_file}" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const data = JSON.parse(fs.readFileSync(process.env.VERSIONS_FILE, 'utf8'));
+          const matches = [];
+
+          function walk(value) {
+            if (Array.isArray(value)) {
+              for (const item of value) {
+                walk(item);
+              }
+              return;
+            }
+
+            if (typeof value !== 'object' || value === null) {
+              return;
+            }
+
+            const tag = value.tag ?? value.version_tag ?? value.versionTag;
+            const id = value.id ?? value.version_id ?? value.versionId;
+            if (tag === process.env.WORKER_VERSION_TAG && typeof id === 'string' && /^[0-9a-fA-F-]{36}$/u.test(id)) {
+              matches.push(id);
+            }
+
+            for (const child of Object.values(value)) {
+              walk(child);
+            }
+          }
+
+          walk(data);
+          const uniqueMatches = [...new Set(matches)];
+          if (uniqueMatches.length !== 1) {
+            throw new Error(`Expected exactly one uploaded Worker version tagged ${process.env.WORKER_VERSION_TAG}.`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `candidate_version_id=${uniqueMatches[0]}\n`);
+          NODE
+
+      - name: Canary and promote candidate
+        id: rollout
+        shell: bash
+        env:
+          PREVIOUS_VERSION_ID: ${{ steps.current_deployment.outputs.previous_version_id }}
+          CANDIDATE_VERSION_ID: ${{ steps.upload.outputs.candidate_version_id }}
+        run: |
+          set -Eeuo pipefail
+
+          rollout_started=false
+          rollback_attempted=false
+
+          validate_uuid() {
+            local value="$1"
+            [[ "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+          }
+
+          if ! validate_uuid "${PREVIOUS_VERSION_ID}" || ! validate_uuid "${CANDIDATE_VERSION_ID}"; then
+            echo "::error title=Invalid Worker version ID::The current or candidate Worker version ID is invalid."
+            exit 1
+          fi
+
+          rollback() {
+            local exit_code=$?
+
+            if [[ "${rollout_started}" == "true" && "${rollback_attempted}" == "false" ]]; then
+              rollback_attempted=true
+              trap - ERR
+              echo "::warning title=Rolling back Worker::Restoring previous Worker version ${PREVIOUS_VERSION_ID}."
+
+              if npx wrangler rollback "${PREVIOUS_VERSION_ID}" \
+                --config "${WRANGLER_RELEASE_CONFIG}" \
+                --message "Automatic rollback after failed deployment ${GITHUB_RUN_ID}"; then
+                verify_public_health_without_version || true
+              else
+                echo "::error title=Automatic rollback failed::Manual Cloudflare rollback to ${PREVIOUS_VERSION_ID} is required immediately."
+              fi
+            fi
+
+            exit "${exit_code}"
+          }
+
+          trap rollback ERR
+
+          get_distribution() {
+            local output_file="$1"
+            npx wrangler deployments status \
+              --config "${WRANGLER_RELEASE_CONFIG}" \
+              --json \
+              > "${output_file}"
+          }
+
+          assert_distribution() {
+            local expected_candidate="$1"
+            local expected_previous="$2"
+            local status_file
+            status_file="$(mktemp)"
+            get_distribution "${status_file}"
+
+            STATUS_FILE="${status_file}" \
+            EXPECTED_CANDIDATE="${expected_candidate}" \
+            EXPECTED_PREVIOUS="${expected_previous}" \
+            node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const data = JSON.parse(fs.readFileSync(process.env.STATUS_FILE, 'utf8'));
+          const percentages = new Map();
+
+          function add(value, generic = false) {
+            if (typeof value !== 'object' || value === null || Array.isArray(value)) return;
+            const id = value.version_id ?? value.versionId ?? (generic ? value.id : undefined);
+            const rawPercentage = value.percentage ?? value.traffic_percentage ?? value.trafficPercentage;
+            const percentage = typeof rawPercentage === 'number' ? rawPercentage : Number(rawPercentage);
+            if (typeof id === 'string' && Number.isFinite(percentage)) {
+              percentages.set(id, Math.max(percentages.get(id) ?? 0, percentage));
+            }
+          }
+
+          function walk(value) {
+            if (Array.isArray(value)) {
+              for (const item of value) walk(item);
+              return;
+            }
+            if (typeof value !== 'object' || value === null) return;
+            add(value, false);
+            for (const [key, child] of Object.entries(value)) {
+              if (key === 'versions') {
+                const items = Array.isArray(child)
+                  ? child
+                  : typeof child === 'object' && child !== null
+                    ? Object.values(child)
+                    : [];
+                for (const item of items) add(item, true);
+              }
+              walk(child);
+            }
+          }
+
+          walk(data);
+          const candidate = percentages.get(process.env.CANDIDATE_VERSION_ID) ?? 0;
+          const previous = percentages.get(process.env.PREVIOUS_VERSION_ID) ?? 0;
+          const expectedCandidate = Number(process.env.EXPECTED_CANDIDATE);
+          const expectedPrevious = Number(process.env.EXPECTED_PREVIOUS);
+
+          if (Math.abs(candidate - expectedCandidate) > 0.01 || Math.abs(previous - expectedPrevious) > 0.01) {
+            throw new Error(`Unexpected deployment distribution: candidate=${candidate}, previous=${previous}.`);
+          }
+          NODE
+
+            rm -f "${status_file}"
+          }
+
+          parse_livez() {
+            local file_path="$1"
+            local expected_version="$2"
+
+            FILE_PATH="${file_path}" EXPECTED_VERSION="${expected_version}" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const body = JSON.parse(fs.readFileSync(process.env.FILE_PATH, 'utf8'));
+          const valid = body?.success === true
+            && body?.data?.status === 'alive'
+            && body?.data?.version === process.env.EXPECTED_VERSION
+            && body?.data?.environment === 'production'
+            && body?.data?.cloud_run_auth_mode === 'id_token';
+          if (!valid) process.exit(1);
+          NODE
+          }
+
+          parse_readyz() {
+            local file_path="$1"
+
+            FILE_PATH="${file_path}" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const body = JSON.parse(fs.readFileSync(process.env.FILE_PATH, 'utf8'));
+          const valid = body?.success === true
+            && body?.data?.status === 'ready'
+            && body?.data?.backend_status === 200
+            && body?.data?.backend_contract === 'valid'
+            && body?.data?.cloud_run_auth_mode === 'id_token';
+          if (!valid) process.exit(1);
+          NODE
+          }
+
+          verify_candidate_health() {
+            local override_header
+            local livez_file
+            local readyz_file
+            local livez_status
+            local readyz_status
+
+            override_header="Cloudflare-Workers-Version-Overrides: ${WORKER_NAME}=\"${CANDIDATE_VERSION_ID}\""
+            livez_file="$(mktemp)"
+            readyz_file="$(mktemp)"
+
+            for attempt in {1..12}; do
+              livez_status="$(curl \
+                --silent \
+                --show-error \
+                --location \
+                --max-time 20 \
+                --header "${override_header}" \
+                --output "${livez_file}" \
+                --write-out '%{http_code}' \
+                "${WORKER_ORIGIN}/livez" || true)"
+
+              readyz_status="$(curl \
+                --silent \
+                --show-error \
+                --location \
+                --max-time 20 \
+                --header "${override_header}" \
+                --output "${readyz_file}" \
+                --write-out '%{http_code}' \
+                "${WORKER_ORIGIN}/readyz" || true)"
+
+              if [[ "${livez_status}" == "200" ]] \
+                && parse_livez "${livez_file}" "${WORKER_VERSION_TAG}" \
+                && [[ "${readyz_status}" == "200" ]] \
+                && parse_readyz "${readyz_file}"; then
+                rm -f "${livez_file}" "${readyz_file}"
+                return 0
+              fi
+
+              if [[ "${attempt}" -lt 12 ]]; then
+                sleep 5
+              fi
+            done
+
+            echo "::error title=Candidate health verification failed::The version override did not return the expected livez and readyz contracts."
+            echo "Candidate livez response:"
+            cat "${livez_file}" || true
+            echo
+            echo "Candidate readyz response:"
+            cat "${readyz_file}" || true
+            rm -f "${livez_file}" "${readyz_file}"
+            return 1
+          }
+
+          verify_public_health_without_version() {
+            local livez_file
+            local readyz_file
+            local livez_status
+            local readyz_status
+
+            livez_file="$(mktemp)"
+            readyz_file="$(mktemp)"
+
+            livez_status="$(curl \
+              --silent \
+              --show-error \
+              --location \
+              --max-time 20 \
+              --output "${livez_file}" \
+              --write-out '%{http_code}' \
+              "${WORKER_ORIGIN}/livez" || true)"
+
+            readyz_status="$(curl \
+              --silent \
+              --show-error \
+              --location \
+              --max-time 20 \
+              --output "${readyz_file}" \
+              --write-out '%{http_code}' \
+              "${WORKER_ORIGIN}/readyz" || true)"
+
+            local result=0
+            if [[ "${livez_status}" != "200" || "${readyz_status}" != "200" ]]; then
+              result=1
+            fi
+
+            rm -f "${livez_file}" "${readyz_file}"
+            return "${result}"
+          }
+
+          verify_final_public_health() {
+            local livez_file
+            local readyz_file
+            local livez_status
+            local readyz_status
+
+            livez_file="$(mktemp)"
+            readyz_file="$(mktemp)"
+
+            for attempt in {1..12}; do
+              livez_status="$(curl \
+                --silent \
+                --show-error \
+                --location \
+                --max-time 20 \
+                --output "${livez_file}" \
+                --write-out '%{http_code}' \
+                "${WORKER_ORIGIN}/livez" || true)"
+
+              readyz_status="$(curl \
+                --silent \
+                --show-error \
+                --location \
+                --max-time 20 \
+                --output "${readyz_file}" \
+                --write-out '%{http_code}' \
+                "${WORKER_ORIGIN}/readyz" || true)"
+
+              if [[ "${livez_status}" == "200" ]] \
+                && parse_livez "${livez_file}" "${WORKER_VERSION_TAG}" \
+                && [[ "${readyz_status}" == "200" ]] \
+                && parse_readyz "${readyz_file}"; then
+                rm -f "${livez_file}" "${readyz_file}"
+                return 0
+              fi
+
+              if [[ "${attempt}" -lt 12 ]]; then
+                sleep 5
+              fi
+            done
+
+            echo "::error title=Final production verification failed::Public traffic did not resolve to the expected promoted Worker version."
+            cat "${livez_file}" || true
+            echo
+            cat "${readyz_file}" || true
+            rm -f "${livez_file}" "${readyz_file}"
+            return 1
+          }
+
+          deploy_distribution() {
+            local candidate_percentage="$1"
+            local previous_percentage="$2"
+            local label="$3"
+
+            npx wrangler versions deploy \
+              "${CANDIDATE_VERSION_ID}@${candidate_percentage}%" \
+              "${PREVIOUS_VERSION_ID}@${previous_percentage}%" \
+              --config "${WRANGLER_RELEASE_CONFIG}" \
+              --message "${label}: ${WORKER_VERSION_TAG} from ${SHORT_SHA}" \
+              --yes
+
+            rollout_started=true
+            assert_distribution "${candidate_percentage}" "${previous_percentage}"
+          }
+
+          deploy_distribution 0 100 "Pre-production smoke"
+          verify_candidate_health
+
+          deploy_distribution 5 95 "Canary 5 percent"
+          sleep "${CANARY_DWELL_SECONDS}"
+          verify_candidate_health
+
+          deploy_distribution 25 75 "Canary 25 percent"
+          sleep "${CANARY_DWELL_SECONDS}"
+          verify_candidate_health
+
+          npx wrangler versions deploy \
+            "${CANDIDATE_VERSION_ID}@100%" \
+            --config "${WRANGLER_RELEASE_CONFIG}" \
+            --message "Production promotion: ${WORKER_VERSION_TAG} from ${SHORT_SHA}" \
+            --yes
+
+          assert_distribution 100 0
+          verify_final_public_health
+
+          rollout_started=false
           trap - ERR
+
+          {
+            echo "promoted=true"
+            echo "candidate_version_id=${CANDIDATE_VERSION_ID}"
+            echo "previous_version_id=${PREVIOUS_VERSION_ID}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Deployment summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## oz-erp-edge production deployment"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Worker | ${WORKER_NAME} |"
+            echo "| Route | ${WORKER_ROUTE} |"
+            echo "| Commit | ${GITHUB_SHA} |"
+            echo "| Runtime version | ${APP_VERSION} |"
+            echo "| Worker version tag | ${WORKER_VERSION_TAG} |"
+            echo "| Previous version ID | ${{ steps.current_deployment.outputs.previous_version_id || 'unavailable' }} |"
+            echo "| Candidate version ID | ${{ steps.upload.outputs.candidate_version_id || 'unavailable' }} |"
+            echo "| Rollout promoted | ${{ steps.rollout.outputs.promoted || 'false' }} |"
+            echo "| GitHub release required | ${{ needs.verify_plan.outputs.release_required }} |"
+            echo
+            echo "The rollout path is 0% version-override smoke, 5% canary, 25% canary, and 100% promotion. Any failure after traffic configuration begins triggers an automatic rollback to the captured stable version."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Remove generated deployment files
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${WRANGLER_RELEASE_CONFIG}"
+          rm -rf dist-release
+
+  create_release:
+    name: Create GitHub release
+    needs:
+      - verify_plan
+      - deploy_production
+    if: needs.verify_plan.outputs.release_required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Build release notes
+        id: release_notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes_file="release-notes.md"
+          commit_range="${{ needs.verify_plan.outputs.commit_range }}"
+          changelog_args=()
+
+          if [[ -n "${commit_range}" ]]; then
+            changelog_args+=("${commit_range}")
+          else
+            changelog_args+=("--max-count=50")
+          fi
+
+          changelog="$(git log "${changelog_args[@]}" --pretty='- %s (`%h`)' --no-merges)"
+          if [[ -z "${changelog}" ]]; then
+            changelog="- $(git log -1 --pretty=%s) (`${{ needs.verify_plan.outputs.short_sha }}`)"
+          fi
+
+          {
+            echo "## Deployment Summary"
+            echo
+            echo "- Worker: \`oz-erp-edge\`"
+            echo "- Route: \`api.erp.ozotecev.com/*\`"
+            echo "- Environment: \`production\`"
+            echo "- Release type: \`${{ needs.verify_plan.outputs.release_type }}\`"
+            echo "- Previous version: \`${{ needs.verify_plan.outputs.base_version }}\`"
+            echo "- Version: \`${{ needs.verify_plan.outputs.package_version }}\`"
+            echo "- Worker version tag: \`${{ needs.verify_plan.outputs.worker_version_tag }}\`"
+            echo "- Worker version ID: \`${{ needs.deploy_production.outputs.candidate_version_id }}\`"
+            echo "- Commit: \`${{ needs.verify_plan.outputs.short_sha }}\`"
+            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo
+            echo "## Changelog"
+            echo
+            printf '%s\n' "${changelog}"
+            echo
+            echo "## Verification and Rollout"
+            echo
+            echo "- Dependency installation from the committed npm lockfile"
+            echo "- Cloudflare generated binding validation"
+            echo "- Strict TypeScript type checking"
+            echo "- ESLint with zero warnings"
+            echo "- Prettier formatting check"
+            echo "- Wrangler strict dry-run bundle"
+            echo "- Production dependency audit at high severity"
+            echo "- Worker startup validation"
+            echo "- Required Cloudflare Worker secret validation"
+            echo "- Candidate version smoke-tested at 0% using a version override"
+            echo "- Candidate promoted through 5%, 25%, and 100% traffic"
+            echo "- Final public \`/livez\` and \`/readyz\` contracts validated"
+            echo "- Automatic rollback protection enabled during promotion"
+          } > "${notes_file}"
+
+          echo "notes_file=${notes_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create immutable GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh release create "${{ needs.verify_plan.outputs.release_tag }}" \
+            --target "${GITHUB_SHA}" \
+            --title "${{ needs.verify_plan.outputs.release_title }}" \
+            --notes-file "${{ steps.release_notes.outputs.notes_file }}" \
+            --latest
+
+      - name: Release summary
+        shell: bash
+        run: |
+          {
+            echo "## GitHub release created"
+            echo
+            echo "- Tag: \`${{ needs.verify_plan.outputs.release_tag }}\`"
+            echo "- Title: \`${{ needs.verify_plan.outputs.release_title }}\`"
+            echo "- Worker version ID: \`${{ needs.deploy_production.outputs.candidate_version_id }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
