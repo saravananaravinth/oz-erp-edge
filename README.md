@@ -1,6 +1,6 @@
 # oz-erp-edge
 
-`oz-erp-edge` is the public Cloudflare Workers gateway for the private `oz-erp-api` Cloud Run
+`oz-erp-edge` is the public Cloudflare Workers gateway for the private server `oz-erp-api` Cloud Run
 service. It is implemented with Hono and strict TypeScript and is deployed at:
 
 ```text
