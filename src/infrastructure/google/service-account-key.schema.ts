@@ -1,3 +1,4 @@
+// oz-erp-edge/src/infrastructure/google/service-account-key.schema.ts
 import { z } from 'zod';
 
 export const serviceAccountKeySchema = z

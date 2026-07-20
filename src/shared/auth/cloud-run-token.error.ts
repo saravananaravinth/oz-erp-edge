@@ -1,3 +1,4 @@
+// oz-erp-edge/src/shared/auth/cloud-run-token.error.ts
 export type CloudRunTokenFailureCategory =
   | 'credential_invalid'
   | 'signing_failed'

@@ -1,3 +1,4 @@
+// oz-erp-edge/src/observability/edge-logger.ts
 import type { EdgeLogger, SafeLogRecord } from './observability.types.js';
 
 function write(method: 'log' | 'error', record: SafeLogRecord): void {

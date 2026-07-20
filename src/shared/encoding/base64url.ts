@@ -1,3 +1,4 @@
+// oz-erp-edge/src/shared/encoding/base64url.ts
 export function base64UrlEncodeBytes(bytes: Uint8Array): string {
   let binary = '';
   const chunkSize = 0x8000;

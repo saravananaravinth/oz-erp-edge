@@ -1,3 +1,4 @@
+// oz-erp-edge/src/config/worker-config.types.ts
 export type CloudRunAuthMode = 'auto' | 'disabled' | 'id_token';
 export type ResolvedCloudRunAuthMode = Exclude<CloudRunAuthMode, 'auto'>;
 

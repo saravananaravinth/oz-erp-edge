@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/proxy/bounded-request-body.reader.ts
 import type { WorkerConfig } from '../../config/index.js';
 import { problemResponse } from '../http/problem-response.js';
 import type { RequestContext } from '../http/request-context.js';

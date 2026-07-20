@@ -1,3 +1,4 @@
+// oz-erp-edge/tests/unit/config/worker-config.test.ts
 import { describe, expect, it } from 'vitest';
 
 import { parseWorkerConfig, resolveCloudRunAuthMode } from '../../../src/config/index.js';

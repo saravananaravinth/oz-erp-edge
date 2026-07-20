@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/cors/cors.headers.ts
 import type { WorkerConfig } from '../../config/index.js';
 
 const CORS_RESPONSE_HEADERS = [

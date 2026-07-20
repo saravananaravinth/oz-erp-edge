@@ -1,3 +1,4 @@
+// oz-erp-edge/src/operations/health/health.controller.ts
 import { resolveCloudRunAuthMode } from '../../config/index.js';
 import { applySecurityHeaders } from '../../gateway/http/security-headers.js';
 import { problemResponse } from '../../gateway/http/problem-response.js';

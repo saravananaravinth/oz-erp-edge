@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/http/worker-http.types.ts
 import type { Context } from 'hono';
 
 import type { WorkerConfig, WorkerEnv } from '../../config/index.js';

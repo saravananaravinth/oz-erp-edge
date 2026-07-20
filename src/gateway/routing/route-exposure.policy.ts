@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/routing/route-exposure.policy.ts
 import type { WorkerConfig } from '../../config/index.js';
 
 function pathStartsWithPrefix(pathname: string, prefix: string): boolean {

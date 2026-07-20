@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/cors/cors.middleware.ts
 import type { MiddlewareHandler, Next } from 'hono';
 
 import type { WorkerContext, WorkerHonoEnv } from '../http/worker-http.types.js';

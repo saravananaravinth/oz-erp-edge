@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/proxy/backend-response.sanitizer.ts
 import { applySecurityHeaders } from '../http/security-headers.js';
 import type { RequestContext } from '../http/request-context.js';
 

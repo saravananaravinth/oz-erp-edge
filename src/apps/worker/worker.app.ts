@@ -1,3 +1,4 @@
+// oz-erp-edge/src/apps/worker/worker.app.ts
 import { Hono } from 'hono';
 
 import { createCorsMiddleware } from '../../gateway/cors/cors.middleware.js';

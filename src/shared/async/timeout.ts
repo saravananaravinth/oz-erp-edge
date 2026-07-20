@@ -1,3 +1,4 @@
+// oz-erp-edge/src/shared/async/timeout.ts
 export class OperationTimeoutError extends Error {
   public constructor(message: string) {
     super(message);

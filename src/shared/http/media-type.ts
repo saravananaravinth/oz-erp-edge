@@ -1,3 +1,4 @@
+// oz-erp-edge/src/shared/http/media-type.ts
 const MEDIA_TYPE_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 const MULTIPART_BOUNDARY_PATTERN = /^[0-9A-Za-z'()+_,./:=?-]{1,70}$/u;
 

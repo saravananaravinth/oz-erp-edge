@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/cors/cors-request.validator.ts
 import type { WorkerConfig } from '../../config/index.js';
 
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;

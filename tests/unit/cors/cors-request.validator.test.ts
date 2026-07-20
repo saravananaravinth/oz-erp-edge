@@ -1,3 +1,4 @@
+// oz-erp-edge/tests/unit/cors/cors-request.validator.test.ts
 import { describe, expect, it } from 'vitest';
 
 import { parseWorkerConfig } from '../../../src/config/index.js';

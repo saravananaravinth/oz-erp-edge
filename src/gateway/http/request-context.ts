@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/http/request-context.ts
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9:_./@-]{8,128}$/u;
 
 export type RequestContext = Readonly<{

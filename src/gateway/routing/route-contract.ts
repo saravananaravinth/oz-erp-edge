@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/routing/route-contract.ts
 export const WEBHOOK_ENDPOINT_KEY_PATTERN = '[A-Za-z0-9._:-]{8,160}';
 export const PUBLIC_TOKEN_PATTERN = '[A-Za-z0-9._~:-]{32,256}';
 export const UUID_PATTERN =

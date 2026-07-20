@@ -1,3 +1,4 @@
+// oz-erp-edge/src/observability/observability.types.ts
 export type SafeLogValue = string | number | boolean | null | readonly string[];
 export type SafeLogRecord = Readonly<Record<string, SafeLogValue>>;
 

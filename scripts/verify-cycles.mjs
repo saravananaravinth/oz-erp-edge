@@ -1,3 +1,4 @@
+// oz-erp-edge/scripts/verify-cycles.mjs
 import fs from 'node:fs';
 import path from 'node:path';
 

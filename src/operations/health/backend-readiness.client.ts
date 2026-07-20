@@ -1,3 +1,4 @@
+// oz-erp-edge/src/operations/health/backend-readiness.client.ts
 import type { WorkerConfig } from '../../config/index.js';
 import { normalizeBaseUrl, shouldUseCloudRunIdToken } from '../../config/index.js';
 import { OperationTimeoutError, withTimeout } from '../../shared/async/timeout.js';

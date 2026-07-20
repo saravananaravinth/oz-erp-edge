@@ -1,3 +1,4 @@
+// oz-erp-edge/src/config/index.ts
 export {
   getWorkerConfig,
   normalizeBaseUrl,

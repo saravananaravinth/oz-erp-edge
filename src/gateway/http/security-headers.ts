@@ -1,3 +1,4 @@
+// oz-erp-edge/src/gateway/http/security-headers.ts
 const API_CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
   "base-uri 'none'",
