@@ -1,6 +1,11 @@
 import type { WorkerConfig } from '../../config/index.js';
 import { normalizeBaseUrl, shouldUseCloudRunIdToken } from '../../config/index.js';
 import { OperationTimeoutError, withTimeout } from '../../shared/async/timeout.js';
+import {
+  classifyCloudRunTokenFailure,
+  type CloudRunTokenFailure,
+} from '../../shared/auth/cloud-run-token.error.js';
+import type { OutboundFetcher } from '../../shared/http/outbound-fetch.js';
 import type { RequestContext } from '../../gateway/http/request-context.js';
 import { backendReadyEnvelopeSchema } from './backend-readiness.schema.js';
 
@@ -11,9 +16,12 @@ export type BackendReadinessResult = Readonly<{
 }>;
 
 export class ReadinessTokenError extends Error {
-  public constructor() {
+  public readonly failure: CloudRunTokenFailure;
+
+  public constructor(failure: CloudRunTokenFailure) {
     super('Cloud Run invocation token is unavailable.');
     this.name = 'ReadinessTokenError';
+    this.failure = failure;
   }
 }
 
@@ -25,7 +33,7 @@ export class ReadinessTimeoutError extends Error {
 }
 
 export type BackendReadinessDependencies = Readonly<{
-  fetcher: typeof fetch;
+  fetcher: OutboundFetcher;
   tokenProvider: (config: WorkerConfig) => Promise<string>;
 }>;
 
@@ -45,8 +53,8 @@ export async function checkBackendReadiness(input: {
         'x-serverless-authorization',
         `Bearer ${await input.dependencies.tokenProvider(input.config)}`,
       );
-    } catch {
-      throw new ReadinessTokenError();
+    } catch (error: unknown) {
+      throw new ReadinessTokenError(classifyCloudRunTokenFailure(error));
     }
   }
 

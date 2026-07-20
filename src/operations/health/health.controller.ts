@@ -69,6 +69,9 @@ export function createHealthController(dependencies: BackendReadinessDependencie
           { status: result.ready ? 200 : 503, headers: jsonHeaders(context) },
         );
       } catch (error: unknown) {
+        if (error instanceof ReadinessTokenError) {
+          context.set('tokenFailure', error.failure);
+        }
         const classification =
           error instanceof ReadinessTimeoutError
             ? {

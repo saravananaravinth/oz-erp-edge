@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 import { OperationTimeoutError, withTimeout } from '../../shared/async/timeout.js';
+import { CloudRunTokenError } from '../../shared/auth/cloud-run-token.error.js';
+import type { OutboundFetcher } from '../../shared/http/outbound-fetch.js';
 
 const googleTokenResponseSchema = z
   .object({
@@ -19,15 +21,8 @@ export type GoogleIdTokenResult = Readonly<{
   expiresInSeconds: number;
 }>;
 
-export class GoogleTokenExchangeError extends Error {
-  public constructor() {
-    super('Google ID token exchange failed.');
-    this.name = 'GoogleTokenExchangeError';
-  }
-}
-
 export async function exchangeGoogleIdToken(input: {
-  readonly fetcher: typeof fetch;
+  readonly fetcher: OutboundFetcher;
   readonly tokenUri: string;
   readonly assertion: string;
   readonly timeoutMs: number;
@@ -52,21 +47,22 @@ export async function exchangeGoogleIdToken(input: {
         }),
     });
   } catch (error: unknown) {
-    if (error instanceof OperationTimeoutError) throw error;
-    throw new GoogleTokenExchangeError();
+    throw new CloudRunTokenError(
+      error instanceof OperationTimeoutError ? 'exchange_timeout' : 'exchange_network',
+    );
   }
 
-  if (!response.ok) throw new GoogleTokenExchangeError();
+  if (!response.ok) throw new CloudRunTokenError('exchange_http', response.status);
 
   let body: unknown;
   try {
     body = await response.json();
   } catch {
-    throw new GoogleTokenExchangeError();
+    throw new CloudRunTokenError('exchange_invalid_response');
   }
 
   const parsed = googleTokenResponseSchema.safeParse(body);
-  if (!parsed.success) throw new GoogleTokenExchangeError();
+  if (!parsed.success) throw new CloudRunTokenError('exchange_invalid_response');
 
   const expiresInSeconds =
     parsed.data.expires_in === undefined

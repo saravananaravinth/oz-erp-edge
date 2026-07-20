@@ -13,6 +13,7 @@
     "logs": { "enabled": true, "head_sampling_rate": 0.1, "invocation_logs": true },
     "traces": { "enabled": true, "head_sampling_rate": 0.01 }
   },
+  "secrets": { "required": ["GCP_SERVICE_ACCOUNT_JSON_B64"] },
   "vars": {
     "APP_ENV": "production",
     "APP_NAME": "oz-erp-edge",

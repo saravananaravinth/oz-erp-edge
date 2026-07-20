@@ -28,7 +28,11 @@ and reduced to the email, PKCS#8 private key, and optional token URI. It is neve
 in problem responses.
 
 The Google ID-token cache is bounded to eight keys, removes expired entries, applies TTL skew, and
-uses single-flight creation. Token exchange and backend requests use bounded timeouts.
+stores only token strings and expiry timestamps. Request-bound promises and I/O objects are never
+shared across Worker invocations. Token exchange and backend requests use bounded timeouts.
+
+Token failures are logged by safe category and optional upstream HTTP status. Assertions, tokens,
+private keys, service-account documents, and upstream response bodies are never logged.
 
 ## Request bodies
 

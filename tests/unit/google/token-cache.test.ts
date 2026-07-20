@@ -1,29 +1,31 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { BoundedTokenCache } from '../../../src/infrastructure/google/token-cache.js';
 
 describe('bounded token cache', () => {
-  it('deduplicates concurrent creation and enforces its maximum size', async () => {
+  it('stores only reusable token data and enforces its maximum size', () => {
     const cache = new BoundedTokenCache(2);
-    const factory = vi.fn(async () => ({ value: 'token-a', expiresAtMs: Date.now() + 120_000 }));
+    const nowMs = Date.now();
 
-    const values = await Promise.all([
-      cache.getOrCreate('a', factory),
-      cache.getOrCreate('a', factory),
-      cache.getOrCreate('a', factory),
-    ]);
-    expect(values).toEqual(['token-a', 'token-a', 'token-a']);
-    expect(factory).toHaveBeenCalledTimes(1);
+    cache.set('a', { value: 'token-a', expiresAtMs: nowMs + 120_000 });
+    cache.set('b', { value: 'token-b', expiresAtMs: nowMs + 120_000 });
+    expect(cache.get('a', nowMs)).toBe('token-a');
 
-    await cache.getOrCreate('b', async () => ({
-      value: 'token-b',
-      expiresAtMs: Date.now() + 120_000,
-    }));
-    await cache.getOrCreate('c', async () => ({
-      value: 'token-c',
-      expiresAtMs: Date.now() + 120_000,
-    }));
+    cache.set('c', { value: 'token-c', expiresAtMs: nowMs + 120_000 });
+
     expect(cache.size).toBe(2);
-    expect(cache.get('a')).toBeNull();
+    expect(cache.get('a', nowMs)).toBe('token-a');
+    expect(cache.get('b', nowMs)).toBeNull();
+    expect(cache.get('c', nowMs)).toBe('token-c');
+  });
+
+  it('rejects tokens within the expiry safety window', () => {
+    const cache = new BoundedTokenCache();
+    const nowMs = Date.now();
+
+    cache.set('expired', { value: 'token', expiresAtMs: nowMs + 30_000 });
+
+    expect(cache.get('expired', nowMs)).toBeNull();
+    expect(cache.size).toBe(0);
   });
 });

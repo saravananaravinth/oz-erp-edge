@@ -6,7 +6,6 @@ export type CachedToken = Readonly<{
 export class BoundedTokenCache {
   readonly #maxEntries: number;
   readonly #tokens = new Map<string, CachedToken>();
-  readonly #inFlight = new Map<string, Promise<CachedToken>>();
 
   public constructor(maxEntries = 8) {
     if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 64) {
@@ -25,24 +24,10 @@ export class BoundedTokenCache {
     return cached.value;
   }
 
-  public async getOrCreate(key: string, factory: () => Promise<CachedToken>): Promise<string> {
-    const cached = this.get(key);
-    if (cached !== null) return cached;
-
-    const active = this.#inFlight.get(key);
-    if (active !== undefined) return (await active).value;
-
-    const pending = factory();
-    this.#inFlight.set(key, pending);
-    try {
-      const created = await pending;
-      this.#tokens.delete(key);
-      this.#tokens.set(key, created);
-      this.#enforceBound();
-      return created.value;
-    } finally {
-      this.#inFlight.delete(key);
-    }
+  public set(key: string, token: CachedToken): void {
+    this.#tokens.delete(key);
+    this.#tokens.set(key, token);
+    this.#enforceBound();
   }
 
   public pruneExpired(nowMs = Date.now()): void {
@@ -53,7 +38,6 @@ export class BoundedTokenCache {
 
   public clear(): void {
     this.#tokens.clear();
-    this.#inFlight.clear();
   }
 
   public get size(): number {

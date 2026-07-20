@@ -4,6 +4,8 @@ import {
   base64UrlEncodeText,
   decodeBase64Json,
 } from '../../shared/encoding/base64url.js';
+import { CloudRunTokenError } from '../../shared/auth/cloud-run-token.error.js';
+import { outboundFetch, type OutboundFetcher } from '../../shared/http/outbound-fetch.js';
 import { exchangeGoogleIdToken } from './google-token.client.js';
 import {
   selectServiceAccountFields,
@@ -13,20 +15,28 @@ import {
 import { BoundedTokenCache } from './token-cache.js';
 
 function parseServiceAccount(config: WorkerConfig): ServiceAccountKey {
-  if (config.GCP_SERVICE_ACCOUNT_JSON_B64 === undefined) {
-    throw new Error('Cloud Run ID token mode requires GCP_SERVICE_ACCOUNT_JSON_B64.');
+  try {
+    if (config.GCP_SERVICE_ACCOUNT_JSON_B64 === undefined) {
+      throw new Error('Missing service-account credential.');
+    }
+    return serviceAccountKeySchema.parse(
+      selectServiceAccountFields(decodeBase64Json(config.GCP_SERVICE_ACCOUNT_JSON_B64)),
+    );
+  } catch {
+    throw new CloudRunTokenError('credential_invalid');
   }
-  return serviceAccountKeySchema.parse(
-    selectServiceAccountFields(decodeBase64Json(config.GCP_SERVICE_ACCOUNT_JSON_B64)),
-  );
 }
 
 function resolveTokenUri(config: WorkerConfig, serviceAccount: ServiceAccountKey): string {
-  const tokenUri = serviceAccount.token_uri ?? config.GOOGLE_TOKEN_URI;
-  if (config.APP_ENV === 'production' && new URL(tokenUri).protocol !== 'https:') {
-    throw new Error('Production Google token exchange must use HTTPS.');
+  try {
+    const tokenUri = serviceAccount.token_uri ?? config.GOOGLE_TOKEN_URI;
+    if (config.APP_ENV === 'production' && new URL(tokenUri).protocol !== 'https:') {
+      throw new Error('Insecure production token URI.');
+    }
+    return tokenUri;
+  } catch {
+    throw new CloudRunTokenError('credential_invalid');
   }
-  return tokenUri;
 }
 
 function pemToArrayBuffer(privateKeyPem: string): ArrayBuffer {
@@ -41,19 +51,23 @@ function pemToArrayBuffer(privateKeyPem: string): ArrayBuffer {
 }
 
 async function signRs256(input: string, privateKeyPem: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'pkcs8',
-    pemToArrayBuffer(privateKeyPem),
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const signature = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
-    key,
-    new TextEncoder().encode(input),
-  );
-  return base64UrlEncodeBytes(new Uint8Array(signature));
+  try {
+    const key = await crypto.subtle.importKey(
+      'pkcs8',
+      pemToArrayBuffer(privateKeyPem),
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const signature = await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      new TextEncoder().encode(input),
+    );
+    return base64UrlEncodeBytes(new Uint8Array(signature));
+  } catch {
+    throw new CloudRunTokenError('signing_failed');
+  }
 }
 
 async function createAssertion(input: {
@@ -78,11 +92,13 @@ async function createAssertion(input: {
 }
 
 export class CloudRunIdTokenProvider {
-  readonly #fetcher: typeof fetch;
+  readonly #fetcher: OutboundFetcher;
   readonly #cache: BoundedTokenCache;
 
-  public constructor(input: Readonly<{ fetcher?: typeof fetch; cache?: BoundedTokenCache }> = {}) {
-    this.#fetcher = input.fetcher ?? fetch;
+  public constructor(
+    input: Readonly<{ fetcher?: OutboundFetcher; cache?: BoundedTokenCache }> = {},
+  ) {
+    this.#fetcher = input.fetcher ?? outboundFetch;
     this.#cache = input.cache ?? new BoundedTokenCache(8);
   }
 
@@ -91,27 +107,29 @@ export class CloudRunIdTokenProvider {
     const tokenUri = resolveTokenUri(config, serviceAccount);
     const cacheKey = `${serviceAccount.client_email}|${config.CLOUD_RUN_AUDIENCE}|${tokenUri}`;
 
-    return await this.#cache.getOrCreate(cacheKey, async () => {
-      const assertion = await createAssertion({
-        serviceAccount,
-        targetAudience: config.CLOUD_RUN_AUDIENCE,
-        tokenUri,
-      });
-      const exchanged = await exchangeGoogleIdToken({
-        fetcher: this.#fetcher,
-        tokenUri,
-        assertion,
-        timeoutMs: config.GOOGLE_TOKEN_TIMEOUT_MS,
-      });
-      const safeTtlSeconds = Math.max(
-        60,
-        exchanged.expiresInSeconds - config.GOOGLE_TOKEN_CACHE_SKEW_SECONDS,
-      );
-      return {
-        value: exchanged.value,
-        expiresAtMs: Date.now() + safeTtlSeconds * 1000,
-      };
+    const cached = this.#cache.get(cacheKey);
+    if (cached !== null) return cached;
+
+    const assertion = await createAssertion({
+      serviceAccount,
+      targetAudience: config.CLOUD_RUN_AUDIENCE,
+      tokenUri,
     });
+    const exchanged = await exchangeGoogleIdToken({
+      fetcher: this.#fetcher,
+      tokenUri,
+      assertion,
+      timeoutMs: config.GOOGLE_TOKEN_TIMEOUT_MS,
+    });
+    const safeTtlSeconds = Math.max(
+      60,
+      exchanged.expiresInSeconds - config.GOOGLE_TOKEN_CACHE_SKEW_SECONDS,
+    );
+    this.#cache.set(cacheKey, {
+      value: exchanged.value,
+      expiresAtMs: Date.now() + safeTtlSeconds * 1000,
+    });
+    return exchanged.value;
   }
 }
 

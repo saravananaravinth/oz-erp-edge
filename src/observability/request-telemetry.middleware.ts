@@ -41,6 +41,22 @@ function logCompleted(context: WorkerContext, startedAt: number, logger: EdgeLog
   });
 }
 
+function logTokenFailure(context: WorkerContext, logger: EdgeLogger): void {
+  const failure = context.get('tokenFailure');
+  if (failure === undefined) return;
+  const requestContext = context.get('requestContext');
+  const version = context.env.CF_VERSION_METADATA;
+  logger.error({
+    event: 'edge_cloud_run_token_failure',
+    request_id: requestContext.requestId,
+    correlation_id: requestContext.correlationId,
+    failure_category: failure.category,
+    exchange_http_status: failure.httpStatus,
+    worker_version: version?.id ?? 'local',
+    worker_tag: version?.tag ?? context.env.APP_VERSION ?? 'unknown',
+  });
+}
+
 export function createRequestTelemetryMiddleware(
   logger: EdgeLogger,
 ): MiddlewareHandler<WorkerHonoEnv> {
@@ -75,6 +91,7 @@ export function createRequestTelemetryMiddleware(
 
     context.set('requestContext', requestContext);
     await next();
+    logTokenFailure(context, logger);
     logCompleted(context, startedAt, logger);
     return context.res;
   };

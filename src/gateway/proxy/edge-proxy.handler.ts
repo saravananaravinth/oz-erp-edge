@@ -1,6 +1,11 @@
 import type { WorkerConfig } from '../../config/index.js';
 import { shouldUseCloudRunIdToken } from '../../config/index.js';
 import { OperationTimeoutError, withTimeout } from '../../shared/async/timeout.js';
+import {
+  classifyCloudRunTokenFailure,
+  type CloudRunTokenFailure,
+} from '../../shared/auth/cloud-run-token.error.js';
+import type { OutboundFetcher } from '../../shared/http/outbound-fetch.js';
 import type { WorkerContext } from '../http/worker-http.types.js';
 import { problemResponse } from '../http/problem-response.js';
 import { classifyBackendRoute } from '../routing/route-classifier.js';
@@ -10,7 +15,7 @@ import { sanitizeBackendResponse } from './backend-response.sanitizer.js';
 import { prepareRequestBody } from './bounded-request-body.reader.js';
 
 export type EdgeProxyDependencies = Readonly<{
-  fetcher: typeof fetch;
+  fetcher: OutboundFetcher;
   tokenProvider: (config: WorkerConfig) => Promise<string>;
 }>;
 
@@ -19,20 +24,23 @@ async function resolveInvocationToken(
   tokenProvider: EdgeProxyDependencies['tokenProvider'],
   requestId: string,
   correlationId: string,
-): Promise<Response | string | null> {
+): Promise<string | null | Readonly<{ response: Response; failure: CloudRunTokenFailure }>> {
   if (!shouldUseCloudRunIdToken(config)) return null;
 
   try {
     return await tokenProvider(config);
-  } catch {
-    return problemResponse({
-      status: 503,
-      code: 'EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE',
-      title: 'Service Unavailable',
-      detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
-      requestId,
-      correlationId,
-    });
+  } catch (error: unknown) {
+    return {
+      failure: classifyCloudRunTokenFailure(error),
+      response: problemResponse({
+        status: 503,
+        code: 'EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE',
+        title: 'Service Unavailable',
+        detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
+        requestId,
+        correlationId,
+      }),
+    };
   }
 }
 
@@ -77,7 +85,10 @@ export function createEdgeProxyHandler(dependencies: EdgeProxyDependencies) {
       requestContext.requestId,
       requestContext.correlationId,
     );
-    if (tokenResult instanceof Response) return tokenResult;
+    if (typeof tokenResult === 'object' && tokenResult !== null) {
+      context.set('tokenFailure', tokenResult.failure);
+      return tokenResult.response;
+    }
 
     const backendRequest = buildBackendRequest({
       request,

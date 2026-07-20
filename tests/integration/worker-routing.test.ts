@@ -1,12 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createWorkerApp } from '../../src/apps/worker/worker.app.js';
 import type { EdgeLogger } from '../../src/observability/observability.types.js';
+import { CloudRunTokenError } from '../../src/shared/auth/cloud-run-token.error.js';
 import { createLocalWorkerEnv } from '../fixtures/worker-env.js';
 
+const logInfo = vi.fn();
+const logError = vi.fn();
 const logger: EdgeLogger = {
-  info: vi.fn(),
-  error: vi.fn(),
+  info: logInfo,
+  error: logError,
 };
 
 function backendReadyResponse(): Response {
@@ -29,6 +32,10 @@ function backendReadyResponse(): Response {
 }
 
 describe('worker integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('serves liveness with production bindings and reports the Cloudflare version tag', async () => {
     const app = createWorkerApp({ logger, fetcher: vi.fn(), tokenProvider: vi.fn() });
     const env = createLocalWorkerEnv({
@@ -72,6 +79,85 @@ describe('worker integration', () => {
 
     const blocked = await app.request('http://edge.local/erp/readyz', undefined, env);
     expect(blocked.status).toBe(404);
+  });
+
+  it('authenticates production readiness and returns the backend readiness contract', async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get('x-serverless-authorization')).toBe(
+        'Bearer signed-cloud-run-token',
+      );
+      return backendReadyResponse();
+    });
+    const tokenProvider = vi.fn(async () => 'signed-cloud-run-token');
+    const app = createWorkerApp({ logger, fetcher, tokenProvider });
+    const env = createLocalWorkerEnv({
+      APP_ENV: 'production',
+      ALLOWED_ORIGINS: 'https://erp.ozotecev.com',
+      CLOUD_RUN_BASE_URL: 'https://service.run.app',
+      CLOUD_RUN_AUDIENCE: 'https://service.run.app',
+      CLOUD_RUN_AUTH_MODE: 'id_token',
+      GCP_SERVICE_ACCOUNT_JSON_B64: 'A'.repeat(128),
+    });
+
+    const response = await app.request('https://api.erp.ozotecev.com/readyz', undefined, env);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      success: true,
+      data: { status: 'ready', cloud_run_auth_mode: 'id_token' },
+    });
+    expect(tokenProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps token failures public-safe and emits only categorized diagnostics', async () => {
+    const sensitiveFailureDetails =
+      'assertion=signed-assertion token=signed-cloud-run-token -----BEGIN PRIVATE KEY----- service-account-json upstream response body';
+    const app = createWorkerApp({
+      logger,
+      fetcher: vi.fn(),
+      tokenProvider: vi.fn(async () => {
+        throw Object.assign(new CloudRunTokenError('exchange_http', 429), {
+          cause: new Error(sensitiveFailureDetails),
+        });
+      }),
+    });
+    const secretValue = 'A'.repeat(128);
+    const env = createLocalWorkerEnv({
+      APP_ENV: 'production',
+      ALLOWED_ORIGINS: 'https://erp.ozotecev.com',
+      CLOUD_RUN_BASE_URL: 'https://service.run.app',
+      CLOUD_RUN_AUDIENCE: 'https://service.run.app',
+      CLOUD_RUN_AUTH_MODE: 'id_token',
+      GCP_SERVICE_ACCOUNT_JSON_B64: secretValue,
+      CF_VERSION_METADATA: {
+        id: '11111111-1111-4111-8111-111111111111',
+        tag: 'v0.6.0-test',
+        timestamp: '2026-07-20T00:00:00.000Z',
+      },
+    });
+
+    const response = await app.request('https://api.erp.ozotecev.com/readyz', undefined, env);
+    const body: unknown = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({
+      code: 'EDGE_CLOUD_RUN_TOKEN_UNAVAILABLE',
+      detail: 'The edge gateway could not obtain a Cloud Run invocation token.',
+    });
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'edge_cloud_run_token_failure',
+        failure_category: 'exchange_http',
+        exchange_http_status: 429,
+        worker_version: '11111111-1111-4111-8111-111111111111',
+        worker_tag: 'v0.6.0-test',
+      }),
+    );
+    const serializedLogs = JSON.stringify(logError.mock.calls);
+    expect(serializedLogs).not.toContain(secretValue);
+    for (const sensitiveFragment of sensitiveFailureDetails.split(' ')) {
+      expect(serializedLogs).not.toContain(sensitiveFragment);
+    }
   });
 
   it('does not treat a bearer token as an origin bypass', async () => {

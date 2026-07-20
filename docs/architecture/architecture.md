@@ -50,4 +50,5 @@ freedom through `scripts/verify-architecture.mjs` and `scripts/verify-cycles.mjs
 - `/tasks/**` and backend operational routes are never proxied publicly.
 - Request bodies are bounded before backend dispatch.
 - Redirects are not followed.
-- The gateway remains stateless except for a bounded, expiring token cache and single-flight map.
+- The gateway remains stateless except for a bounded, expiring cache of token strings and expiry
+  timestamps; concurrent misses never share request-bound promises or I/O objects.
