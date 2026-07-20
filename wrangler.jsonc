@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "oz-erp-edge",
-  "main": "src/index.ts",
+  "main": "src/apps/worker/worker.entrypoint.ts",
   "compatibility_date": "2026-07-15",
   "workers_dev": false,
   "minify": true,

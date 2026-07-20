@@ -1,4 +1,3 @@
-// oz-erp-edge/eslint.config.js
 import js from '@eslint/js';
 import prettier from 'eslint-config-prettier';
 import { defineConfig } from 'eslint/config';
@@ -12,16 +11,23 @@ const workerGlobals = {
   atob: 'readonly',
 };
 
-const vitestGlobals = {
-  afterAll: 'readonly',
-  afterEach: 'readonly',
-  beforeAll: 'readonly',
-  beforeEach: 'readonly',
-  describe: 'readonly',
-  expect: 'readonly',
-  it: 'readonly',
-  test: 'readonly',
-  vi: 'readonly',
+const typedRules = {
+  '@typescript-eslint/consistent-type-definitions': ['error', 'type'],
+  '@typescript-eslint/consistent-type-imports': [
+    'error',
+    { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
+  ],
+  '@typescript-eslint/no-explicit-any': 'error',
+  '@typescript-eslint/no-floating-promises': 'error',
+  '@typescript-eslint/no-non-null-assertion': 'error',
+  '@typescript-eslint/no-unsafe-assignment': 'error',
+  '@typescript-eslint/no-unsafe-call': 'error',
+  '@typescript-eslint/no-unsafe-member-access': 'error',
+  '@typescript-eslint/no-unsafe-return': 'error',
+  '@typescript-eslint/prefer-nullish-coalescing': 'error',
+  '@typescript-eslint/prefer-optional-chain': 'error',
+  '@typescript-eslint/require-await': 'error',
+  '@typescript-eslint/return-await': ['error', 'always'],
 };
 
 export default defineConfig(
@@ -45,59 +51,53 @@ export default defineConfig(
       ecmaVersion: 2024,
       sourceType: 'module',
       globals: workerGlobals,
-      parserOptions: {
-        projectService: true,
-        tsconfigRootDir: import.meta.dirname,
-      },
+      parserOptions: { project: './tsconfig.json', tsconfigRootDir: import.meta.dirname },
     },
     rules: {
-      '@typescript-eslint/consistent-type-definitions': ['error', 'type'],
-      '@typescript-eslint/consistent-type-imports': [
+      ...typedRules,
+      'no-console': 'error',
+      'no-restricted-imports': [
         'error',
         {
-          prefer: 'type-imports',
-          fixStyle: 'inline-type-imports',
+          patterns: [
+            {
+              group: ['**/src/config.ts', '**/src/cors.ts', '**/src/proxy.ts', '**/src/health.ts'],
+              message: 'Legacy flat source paths are forbidden.',
+            },
+          ],
         },
       ],
-      '@typescript-eslint/no-explicit-any': 'error',
-      '@typescript-eslint/no-floating-promises': 'error',
-      '@typescript-eslint/no-non-null-assertion': 'error',
-      '@typescript-eslint/no-unsafe-assignment': 'error',
-      '@typescript-eslint/no-unsafe-call': 'error',
-      '@typescript-eslint/no-unsafe-member-access': 'error',
-      '@typescript-eslint/no-unsafe-return': 'error',
-      '@typescript-eslint/prefer-nullish-coalescing': 'error',
-      '@typescript-eslint/prefer-optional-chain': 'error',
-      '@typescript-eslint/require-await': 'error',
-      '@typescript-eslint/return-await': ['error', 'always'],
-      'no-console': 'error',
     },
   },
   {
     files: ['tests/**/*.ts', 'vitest.config.ts'],
     extends: [
       js.configs.recommended,
-      tseslint.configs.strict,
-      tseslint.configs.stylistic,
-      tseslint.configs.disableTypeChecked,
+      tseslint.configs.strictTypeChecked,
+      tseslint.configs.stylisticTypeChecked,
     ],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: 'module',
-      globals: {
-        ...globals.node,
-        ...workerGlobals,
-        ...vitestGlobals,
-      },
-      parserOptions: {
-        project: false,
-        projectService: false,
-      },
+      globals: { ...globals.node, ...workerGlobals },
+      parserOptions: { project: './tsconfig.test.json', tsconfigRootDir: import.meta.dirname },
     },
     rules: {
-      '@typescript-eslint/explicit-function-return-type': 'off',
+      ...typedRules,
       '@typescript-eslint/no-non-null-assertion': 'off',
       '@typescript-eslint/require-await': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
+    files: ['scripts/**/*.mjs', '.github/scripts/**/*.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: 'module',
+      globals: globals.node,
+    },
+    rules: {
       'no-console': 'off',
     },
   },

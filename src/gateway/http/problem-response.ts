@@ -1,5 +1,4 @@
-// oz-erp-edge/src/problem.ts
-import { applySecurityHeaders } from './security.js';
+import { applySecurityHeaders } from './security-headers.js';
 
 export type ProblemStatus = 400 | 401 | 403 | 404 | 405 | 413 | 415 | 502 | 503 | 504;
 
@@ -13,7 +12,7 @@ export type ProblemDetails = Readonly<{
   timestamp: string;
 }>;
 
-export function problemJson(input: {
+export function problemResponse(input: {
   readonly status: ProblemStatus;
   readonly code: string;
   readonly title: string;
@@ -31,15 +30,11 @@ export function problemJson(input: {
     request_id: input.requestId,
     timestamp: new Date().toISOString(),
   };
-
   const headers = applySecurityHeaders(new Headers(input.headers));
   headers.set('content-type', 'application/problem+json; charset=utf-8');
   headers.set('cache-control', 'no-store');
   headers.set('x-request-id', input.requestId);
   headers.set('x-correlation-id', input.correlationId ?? input.requestId);
 
-  return new Response(JSON.stringify(body), {
-    status: input.status,
-    headers,
-  });
+  return new Response(JSON.stringify(body), { status: input.status, headers });
 }

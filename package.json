@@ -1,7 +1,7 @@
 {
   "name": "oz-erp-edge",
   "version": "0.1.0",
-  "description": "Cloudflare Hono Worker gateway for the private oz-erp-api Cloud Run service.",
+  "description": "Enterprise Cloudflare Hono gateway for the private oz-erp-api Cloud Run service.",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -14,15 +14,18 @@
     "dev:remote": "wrangler dev --local=false",
     "build": "wrangler deploy --dry-run --outdir dist --strict",
     "deploy": "wrangler deploy --strict",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "architecture:check": "node scripts/verify-architecture.mjs",
+    "architecture:cycles": "node scripts/verify-cycles.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",
+    "test": "vitest run",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
     "audit:prod": "npm audit --omit=dev --audit-level=high",
-    "verify": "npm run cf:typegen:check && npm run typecheck && npm run lint && npm run format:check && npm run build && npm run audit:prod",
+    "verify": "npm run cf:typegen:check && npm run architecture:check && npm run architecture:cycles && npm run typecheck && npm run lint && npm run test && npm run format:check && npm run build && npm run audit:prod",
     "cf:typegen": "wrangler types src/worker-configuration.d.ts --env-file /dev/null",
-    "cf:typegen:check": "npm run cf:typegen && git diff --exit-code -- src/worker-configuration.d.ts",
+    "cf:typegen:check": "wrangler types src/worker-configuration.d.ts --env-file /dev/null --check",
     "cf:startup": "wrangler check startup"
   },
   "dependencies": {
@@ -31,18 +34,20 @@
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "@types/node": "24.0.15",
     "eslint": "9.39.5",
     "eslint-config-prettier": "10.1.8",
     "globals": "16.5.0",
     "prettier": "3.9.5",
     "typescript": "5.9.3",
     "typescript-eslint": "8.64.0",
-    "wrangler": "4.111.0"
+    "vitest": "4.1.10",
+    "wrangler": "4.112.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
     "sharp@0.34.5": true,
-    "workerd@1.20260710.1": true
+    "workerd@1.20260714.1": true
   },
   "packageManager": "npm@12.0.1"
 }

@@ -1,4 +1,3 @@
-// oz-erp-edge/src/security.ts
 const API_CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
   "base-uri 'none'",
@@ -20,13 +19,9 @@ export function applySecurityHeaders(headers: Headers): Headers {
   if (!headers.has('content-security-policy')) {
     headers.set('content-security-policy', API_CONTENT_SECURITY_POLICY);
   }
-
-  if (!headers.has('cache-control')) {
-    headers.set('cache-control', 'no-store');
-  }
+  if (!headers.has('cache-control')) headers.set('cache-control', 'no-store');
 
   headers.delete('server');
   headers.delete('x-powered-by');
-
   return headers;
 }

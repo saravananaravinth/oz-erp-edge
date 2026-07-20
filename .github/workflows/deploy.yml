@@ -112,11 +112,14 @@ jobs:
             eslint.config.js
             prettier.config.js
             wrangler.jsonc
-            src/index.ts
-            src/config.ts
-            src/proxy.ts
-            src/route-policy.ts
-            src/health.ts
+            src/apps/worker/worker.entrypoint.ts
+            src/apps/worker/worker.app.ts
+            src/config/worker-env.schema.ts
+            src/gateway/routing/route-contract.ts
+            src/gateway/proxy/edge-proxy.handler.ts
+            src/infrastructure/google/cloud-run-id-token.provider.ts
+            src/operations/health/health.controller.ts
+            src/observability/request-telemetry.middleware.ts
           )
 
           for required_file in "${required_files[@]}"; do
@@ -270,21 +273,17 @@ jobs:
             }
           }
 
-          for (const scriptName of ['verify', 'cf:typegen:check', 'typecheck', 'lint', 'format:check', 'build', 'audit:prod', 'cf:startup']) {
+          for (const scriptName of ['verify', 'cf:typegen:check', 'architecture:check', 'architecture:cycles', 'typecheck', 'lint', 'test', 'format:check', 'build', 'audit:prod', 'cf:startup']) {
             if (typeof packageJson.scripts?.[scriptName] !== 'string' || packageJson.scripts[scriptName].trim().length === 0) {
               throw new Error(`package.json script ${scriptName} is required.`);
             }
           }
 
-          if (Object.prototype.hasOwnProperty.call(packageJson.scripts ?? {}, 'test')) {
-            throw new Error('The deployment contract does not include an automated test script; remove stale test execution from the workflow instead.');
-          }
-
           if (config.name !== process.env.EXPECTED_WORKER_NAME) {
             throw new Error(`wrangler.jsonc name must be ${process.env.EXPECTED_WORKER_NAME}.`);
           }
-          if (config.main !== 'src/index.ts') {
-            throw new Error('wrangler.jsonc main must be src/index.ts.');
+          if (config.main !== 'src/apps/worker/worker.entrypoint.ts') {
+            throw new Error('wrangler.jsonc main must be src/apps/worker/worker.entrypoint.ts.');
           }
           if (config.workers_dev !== false) {
             throw new Error('workers_dev must be false in production.');
