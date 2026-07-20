@@ -112,6 +112,7 @@ jobs:
             eslint.config.js
             prettier.config.js
             wrangler.jsonc
+            scripts/verify-candidate-smoke.mjs
             src/apps/worker/worker.entrypoint.ts
             src/apps/worker/worker.app.ts
             src/config/worker-env.schema.ts
@@ -1196,76 +1197,6 @@ jobs:
             return 1
           }
 
-          verify_candidate_cold_start() {
-            local override_header
-            local livez_file
-            local livez_status
-            local smoke_dir
-            local failures=0
-            local index
-            local -a pids=()
-
-            override_header="Cloudflare-Workers-Version-Overrides: ${WORKER_NAME}=\"${CANDIDATE_VERSION_ID}\""
-            livez_file="$(mktemp)"
-            livez_status="$(curl \
-              --silent \
-              --show-error \
-              --location \
-              --max-time 20 \
-              --header "${override_header}" \
-              --output "${livez_file}" \
-              --write-out '%{http_code}' \
-              "${WORKER_ORIGIN}/livez" || true)"
-
-            if [[ "${livez_status}" != "200" ]] || ! parse_livez "${livez_file}" "${WORKER_VERSION_TAG}"; then
-              echo "::error title=Candidate liveness verification failed::The version override did not return the expected livez contract."
-              cat "${livez_file}" || true
-              rm -f "${livez_file}"
-              return 1
-            fi
-            rm -f "${livez_file}"
-
-            smoke_dir="$(mktemp -d)"
-            for index in {1..8}; do
-              (
-                readyz_file="${smoke_dir}/readyz-${index}.json"
-                readyz_status="$(curl \
-                  --silent \
-                  --show-error \
-                  --location \
-                  --max-time 20 \
-                  --header "${override_header}" \
-                  --output "${readyz_file}" \
-                  --write-out '%{http_code}' \
-                  "${WORKER_ORIGIN}/readyz" || true)"
-
-                if [[ "${readyz_status}" != "200" ]] || ! parse_readyz "${readyz_file}"; then
-                  echo "Concurrent readiness attempt ${index} returned HTTP ${readyz_status}."
-                  cat "${readyz_file}" || true
-                  exit 1
-                fi
-              ) > "${smoke_dir}/attempt-${index}.log" 2>&1 &
-              pids+=("$!")
-            done
-
-            for index in "${!pids[@]}"; do
-              if ! wait "${pids[$index]}"; then
-                failures=$((failures + 1))
-                cat "${smoke_dir}/attempt-$((index + 1)).log" || true
-              fi
-            done
-
-            for index in {1..8}; do
-              rm -f "${smoke_dir}/readyz-${index}.json" "${smoke_dir}/attempt-${index}.log"
-            done
-            rmdir "${smoke_dir}"
-
-            if [[ "${failures}" -ne 0 ]]; then
-              echo "::error title=Concurrent candidate readiness failed::${failures} of 8 cold-start readiness requests failed."
-              return 1
-            fi
-          }
-
           verify_public_health_without_version() {
             local livez_file
             local readyz_file
@@ -1368,7 +1299,7 @@ jobs:
           }
 
           deploy_distribution 0 100 "Pre-production smoke"
-          verify_candidate_cold_start
+          node scripts/verify-candidate-smoke.mjs
 
           deploy_distribution 5 95 "Canary 5 percent"
           sleep "${CANARY_DWELL_SECONDS}"

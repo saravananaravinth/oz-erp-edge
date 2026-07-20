@@ -90,7 +90,7 @@ export default defineConfig(
     },
   },
   {
-    files: ['scripts/**/*.mjs', '.github/scripts/**/*.mjs'],
+    files: ['scripts/**/*.mjs', '.github/scripts/**/*.mjs', 'tests/**/*.mjs'],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 2024,
