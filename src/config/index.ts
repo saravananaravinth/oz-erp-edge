@@ -9,5 +9,7 @@ export type { WorkerConfig } from './worker-env.schema.js';
 export type {
   CloudRunAuthMode,
   ResolvedCloudRunAuthMode,
+  WorkerConfigEnv,
   WorkerEnv,
+  WorkerPlatformBindings,
 } from './worker-config.types.js';

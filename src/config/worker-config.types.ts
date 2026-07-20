@@ -7,7 +7,7 @@ export type CloudflareVersionMetadata = Readonly<{
   timestamp: string;
 }>;
 
-export type WorkerEnv = Readonly<{
+export type WorkerConfigEnv = Readonly<{
   APP_ENV?: string;
   APP_NAME?: string;
   APP_VERSION?: string;
@@ -33,8 +33,13 @@ export type WorkerEnv = Readonly<{
   GOOGLE_TOKEN_TIMEOUT_MS?: string;
   GOOGLE_TOKEN_CACHE_SKEW_SECONDS?: string;
   GCP_SERVICE_ACCOUNT_JSON_B64?: string;
+}>;
+
+export type WorkerPlatformBindings = Readonly<{
   CF_VERSION_METADATA?: CloudflareVersionMetadata;
 }>;
+
+export type WorkerEnv = WorkerConfigEnv & WorkerPlatformBindings;
 
 export type CloudRunAuthConfig = Readonly<{
   CLOUD_RUN_AUTH_MODE: CloudRunAuthMode;

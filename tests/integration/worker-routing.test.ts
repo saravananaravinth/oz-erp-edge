@@ -29,6 +29,37 @@ function backendReadyResponse(): Response {
 }
 
 describe('worker integration', () => {
+  it('serves liveness with production bindings and reports the Cloudflare version tag', async () => {
+    const app = createWorkerApp({ logger, fetcher: vi.fn(), tokenProvider: vi.fn() });
+    const env = createLocalWorkerEnv({
+      APP_ENV: 'production',
+      ALLOWED_ORIGINS: 'https://erp.ozotecev.com',
+      CLOUD_RUN_BASE_URL: 'https://service.run.app',
+      CLOUD_RUN_AUDIENCE: 'https://service.run.app',
+      CLOUD_RUN_AUTH_MODE: 'id_token',
+      GCP_SERVICE_ACCOUNT_JSON_B64: 'A'.repeat(128),
+      CF_VERSION_METADATA: {
+        id: '11111111-1111-4111-8111-111111111111',
+        tag: 'v0.5.0-test',
+        timestamp: '2026-07-20T00:00:00.000Z',
+      },
+    });
+
+    const response = await app.request('https://api.erp.ozotecev.com/livez', undefined, env);
+    const body: unknown = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      success: true,
+      data: {
+        status: 'alive',
+        version: 'v0.5.0-test',
+        environment: 'production',
+        cloud_run_auth_mode: 'id_token',
+      },
+    });
+  });
+
   it('serves health and blocks private backend readiness from public proxying', async () => {
     const fetcher = vi.fn(async () => backendReadyResponse());
     const app = createWorkerApp({ logger, fetcher, tokenProvider: vi.fn() });
