@@ -8,6 +8,10 @@ export const TELECMI_WEBHOOK_PATTERN = new RegExp(
   `^/erp/channel-ingest/webhooks/telecmi/${WEBHOOK_ENDPOINT_KEY_PATTERN}$`,
   'u',
 );
+export const META_WEBHOOK_PATTERN = new RegExp(
+  `^/erp/channel-ingest/webhooks/meta/${WEBHOOK_ENDPOINT_KEY_PATTERN}$`,
+  'u',
+);
 export const MSG91_WEBHOOK_PATTERN = new RegExp(
   `^/erp/channel-ingest/webhooks/msg91/${WEBHOOK_ENDPOINT_KEY_PATTERN}$`,
   'u',
@@ -16,6 +20,20 @@ export const ZEPTOMAIL_WEBHOOK_PATTERN = new RegExp(
   `^/erp/channel-ingest/webhooks/zeptomail/${WEBHOOK_ENDPOINT_KEY_PATTERN}$`,
   'u',
 );
+
+/**
+ * Provider webhook routes whose public API contract permits POST only.
+ *
+ * Keeping the method contract next to the path contract reduces the risk that a
+ * newly added server-to-server webhook is exposed to the mutation-origin bypass
+ * for unsupported methods.
+ */
+export const POST_ONLY_RAW_WEBHOOK_PATTERNS = [
+  META_WEBHOOK_PATTERN,
+  MSG91_WEBHOOK_PATTERN,
+  ZEPTOMAIL_WEBHOOK_PATTERN,
+] as const;
+
 export const WARRANTY_UPLOAD_PATTERN = new RegExp(
   `^/erp/engagement/public/forms/warranty/${PUBLIC_TOKEN_PATTERN}/files$`,
   'u',
