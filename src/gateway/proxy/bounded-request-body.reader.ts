@@ -1,20 +1,22 @@
 // oz-erp-edge/src/gateway/proxy/bounded-request-body.reader.ts
 import type { WorkerConfig } from '../../config/index.js';
-import { problemResponse } from '../http/problem-response.js';
-import type { RequestContext } from '../http/request-context.js';
-import type { BackendRouteClass } from '../routing/route-classifier.js';
 import {
   isJsonMediaType,
   parseContentType,
   type ParsedContentType,
 } from '../../shared/http/media-type.js';
+import { problemResponse } from '../http/problem-response.js';
+import type { RequestContext } from '../http/request-context.js';
+import type { BackendRouteClass } from '../routing/route-classifier.js';
 
 const METHODS_WITHOUT_BODY = new Set(['GET', 'HEAD']);
 const WARRANTY_UPLOAD_MULTIPART_MAX_BODY_BYTES = 11 * 1024 * 1024;
+const SHA256_HEX_BYTE_LENGTH = 32;
 
 export type PreparedRequestBody = Readonly<{
   body: BodyInit | null;
   byteLength: number;
+  rawWebhookBodySha256: string | null;
 }>;
 
 export type BodyPreparationResult = PreparedRequestBody | Response;
@@ -37,12 +39,34 @@ function mergeChunks(chunks: readonly Uint8Array[], byteLength: number): ArrayBu
   return buffer;
 }
 
+function withoutRawWebhookIntegrity(
+  body: BodyInit | null,
+  byteLength: number,
+): PreparedRequestBody {
+  return {
+    body,
+    byteLength,
+    rawWebhookBodySha256: null,
+  };
+}
+
 function contentLengthFailure(requestContext: RequestContext): Response {
   return problemResponse({
     status: 400,
     code: 'EDGE_CONTENT_LENGTH_INVALID',
     title: 'Invalid Content-Length',
     detail: 'Content-Length must be a non-negative integer.',
+    requestId: requestContext.requestId,
+    correlationId: requestContext.correlationId,
+  });
+}
+
+function contentLengthMismatch(requestContext: RequestContext): Response {
+  return problemResponse({
+    status: 400,
+    code: 'EDGE_CONTENT_LENGTH_MISMATCH',
+    title: 'Invalid request body',
+    detail: 'The request body length does not match the declared Content-Length.',
     requestId: requestContext.requestId,
     correlationId: requestContext.correlationId,
   });
@@ -57,6 +81,25 @@ function payloadTooLarge(requestContext: RequestContext): Response {
     requestId: requestContext.requestId,
     correlationId: requestContext.correlationId,
   });
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let output = '';
+  for (const byte of bytes) {
+    output += byte.toString(16).padStart(2, '0');
+  }
+  return output;
+}
+
+async function sha256Hex(body: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', body);
+  const digestBytes = new Uint8Array(digest);
+
+  if (digestBytes.byteLength !== SHA256_HEX_BYTE_LENGTH) {
+    throw new Error('Unexpected SHA-256 digest length.');
+  }
+
+  return bytesToHex(digestBytes);
 }
 
 export function resolveMaxRequestBodyBytes(
@@ -88,7 +131,7 @@ async function readBoundedBody(
   maxBodyBytes: number,
   requestContext: RequestContext,
 ): Promise<BodyPreparationResult> {
-  if (request.body === null) return { body: null, byteLength: 0 };
+  if (request.body === null) return withoutRawWebhookIntegrity(null, 0);
 
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -131,10 +174,54 @@ async function readBoundedBody(
     reader.releaseLock();
   }
 
-  return {
-    body: byteLength === 0 ? null : mergeChunks(chunks, byteLength),
+  return withoutRawWebhookIntegrity(
+    byteLength === 0 ? null : mergeChunks(chunks, byteLength),
     byteLength,
-  };
+  );
+}
+
+async function prepareRawWebhookBody(input: {
+  readonly request: Request;
+  readonly maxBodyBytes: number;
+  readonly declaredContentLength: number | null;
+  readonly requestContext: RequestContext;
+}): Promise<BodyPreparationResult> {
+  const buffered = await readBoundedBody(input.request, input.maxBodyBytes, input.requestContext);
+  if (buffered instanceof Response) return buffered;
+
+  if (input.declaredContentLength !== null && input.declaredContentLength !== buffered.byteLength) {
+    return contentLengthMismatch(input.requestContext);
+  }
+
+  if (buffered.body !== null && !(buffered.body instanceof ArrayBuffer)) {
+    return problemResponse({
+      status: 500,
+      code: 'EDGE_REQUEST_BODY_BUFFERING_FAILED',
+      title: 'Internal Server Error',
+      detail: 'The edge gateway could not prepare the webhook request safely.',
+      requestId: input.requestContext.requestId,
+      correlationId: input.requestContext.correlationId,
+    });
+  }
+
+  const rawBody = buffered.body ?? new ArrayBuffer(0);
+
+  try {
+    return {
+      body: buffered.body,
+      byteLength: buffered.byteLength,
+      rawWebhookBodySha256: await sha256Hex(rawBody),
+    };
+  } catch {
+    return problemResponse({
+      status: 500,
+      code: 'EDGE_WEBHOOK_INTEGRITY_UNAVAILABLE',
+      title: 'Internal Server Error',
+      detail: 'The edge gateway could not establish webhook body integrity.',
+      requestId: input.requestContext.requestId,
+      correlationId: input.requestContext.correlationId,
+    });
+  }
 }
 
 export async function prepareRequestBody(input: {
@@ -157,7 +244,7 @@ export async function prepareRequestBody(input: {
     });
   }
 
-  if (METHODS_WITHOUT_BODY.has(method)) return { body: null, byteLength: 0 };
+  if (METHODS_WITHOUT_BODY.has(method)) return withoutRawWebhookIntegrity(null, 0);
 
   const maxBodyBytes = resolveMaxRequestBodyBytes(input.routeClass, input.config);
   const declaredContentLength = readContentLength(input.request);
@@ -166,9 +253,6 @@ export async function prepareRequestBody(input: {
   }
   if (declaredContentLength !== null && declaredContentLength > maxBodyBytes) {
     return payloadTooLarge(input.requestContext);
-  }
-  if (input.request.body === null || declaredContentLength === 0) {
-    return { body: null, byteLength: 0 };
   }
 
   const rawContentType = input.request.headers.get('content-type');
@@ -193,8 +277,21 @@ export async function prepareRequestBody(input: {
     }
   }
 
+  if (input.routeClass === 'RAW_WEBHOOK') {
+    return await prepareRawWebhookBody({
+      request: input.request,
+      maxBodyBytes,
+      declaredContentLength,
+      requestContext: input.requestContext,
+    });
+  }
+
+  if (input.request.body === null || declaredContentLength === 0) {
+    return withoutRawWebhookIntegrity(null, 0);
+  }
+
   if (declaredContentLength !== null) {
-    return { body: input.request.body, byteLength: declaredContentLength };
+    return withoutRawWebhookIntegrity(input.request.body, declaredContentLength);
   }
 
   return await readBoundedBody(input.request, maxBodyBytes, input.requestContext);

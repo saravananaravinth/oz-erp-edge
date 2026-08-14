@@ -1,7 +1,7 @@
 // oz-erp-edge/src/gateway/http/problem-response.ts
 import { applySecurityHeaders } from './security-headers.js';
 
-export type ProblemStatus = 400 | 401 | 403 | 404 | 405 | 413 | 415 | 502 | 503 | 504;
+export type ProblemStatus = 400 | 401 | 403 | 404 | 405 | 413 | 415 | 500 | 502 | 503 | 504;
 
 export type ProblemDetails = Readonly<{
   type: string;

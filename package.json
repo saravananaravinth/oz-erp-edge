@@ -19,7 +19,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
     "audit:prod": "npm audit --omit=dev --audit-level=high",

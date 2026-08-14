@@ -1,6 +1,10 @@
 // oz-erp-edge/src/gateway/proxy/request-header.policy.ts
 import type { RequestContext } from '../http/request-context.js';
 
+export const RAW_WEBHOOK_BODY_SHA256_HEADER = 'x-oz-edge-body-sha256' as const;
+
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
+
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -24,6 +28,7 @@ const FORBIDDEN_INBOUND_HEADERS = new Set([
   'host',
   'x-goog-authenticated-user-email',
   'x-goog-authenticated-user-id',
+  RAW_WEBHOOK_BODY_SHA256_HEADER,
   'x-oz-edge-gateway',
   'x-oz-task-secret',
   'x-real-ip',
@@ -55,6 +60,7 @@ export function buildBackendHeaders(input: {
   readonly request: Request;
   readonly invocationToken: string | null;
   readonly requestContext: RequestContext;
+  readonly rawWebhookBodySha256: string | null;
 }): Headers {
   const headers = new Headers();
 
@@ -64,6 +70,13 @@ export function buildBackendHeaders(input: {
 
   if (input.invocationToken !== null) {
     headers.set('x-serverless-authorization', `Bearer ${input.invocationToken}`);
+  }
+
+  if (input.rawWebhookBodySha256 !== null) {
+    if (!SHA256_HEX_PATTERN.test(input.rawWebhookBodySha256)) {
+      throw new Error('Invalid internally generated raw-webhook body digest.');
+    }
+    headers.set(RAW_WEBHOOK_BODY_SHA256_HEADER, input.rawWebhookBodySha256);
   }
 
   headers.set('x-request-id', input.requestContext.requestId);

@@ -30,6 +30,7 @@ export function buildBackendRequest(input: {
       request: input.request,
       invocationToken: input.invocationToken,
       requestContext: input.requestContext,
+      rawWebhookBodySha256: input.preparedBody.rawWebhookBodySha256,
     }),
     body: input.preparedBody.body,
     redirect: 'manual',
