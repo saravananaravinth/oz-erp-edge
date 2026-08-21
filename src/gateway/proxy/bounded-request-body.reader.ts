@@ -83,6 +83,27 @@ function payloadTooLarge(requestContext: RequestContext): Response {
   });
 }
 
+function unsupportedMediaType(
+  routeClass: BackendRouteClass,
+  requestContext: RequestContext,
+): Response {
+  const detail =
+    routeClass === 'WARRANTY_MULTIPART'
+      ? 'Warranty file upload requires multipart/form-data with a valid boundary.'
+      : routeClass === 'RAW_WEBHOOK'
+        ? 'The webhook Content-Type header is malformed.'
+        : 'Only JSON and URL-encoded request bodies are accepted for this ERP route.';
+
+  return problemResponse({
+    status: 415,
+    code: 'EDGE_UNSUPPORTED_MEDIA_TYPE',
+    title: 'Unsupported Media Type',
+    detail,
+    requestId: requestContext.requestId,
+    correlationId: requestContext.correlationId,
+  });
+}
+
 function bytesToHex(bytes: Uint8Array): string {
   let output = '';
   for (const byte of bytes) {
@@ -255,25 +276,25 @@ export async function prepareRequestBody(input: {
     return payloadTooLarge(input.requestContext);
   }
 
+  if (input.request.body === null) {
+    return withoutRawWebhookIntegrity(null, 0);
+  }
+
+  if (input.routeClass !== 'RAW_WEBHOOK' && declaredContentLength === 0) {
+    return withoutRawWebhookIntegrity(null, 0);
+  }
+
   const rawContentType = input.request.headers.get('content-type');
   const contentType = parseContentType(rawContentType);
   if (!(input.routeClass === 'RAW_WEBHOOK' && rawContentType === null)) {
     if (!isContentTypeAllowed(input.routeClass, contentType)) {
-      const detail =
-        input.routeClass === 'WARRANTY_MULTIPART'
-          ? 'Warranty file upload requires multipart/form-data with a valid boundary.'
-          : input.routeClass === 'RAW_WEBHOOK'
-            ? 'The webhook Content-Type header is malformed.'
-            : 'Only JSON and URL-encoded request bodies are accepted for this ERP route.';
+      if (declaredContentLength === null) {
+        const buffered = await readBoundedBody(input.request, maxBodyBytes, input.requestContext);
+        if (buffered instanceof Response) return buffered;
+        if (buffered.byteLength === 0) return buffered;
+      }
 
-      return problemResponse({
-        status: 415,
-        code: 'EDGE_UNSUPPORTED_MEDIA_TYPE',
-        title: 'Unsupported Media Type',
-        detail,
-        requestId: input.requestContext.requestId,
-        correlationId: input.requestContext.correlationId,
-      });
+      return unsupportedMediaType(input.routeClass, input.requestContext);
     }
   }
 
@@ -284,10 +305,6 @@ export async function prepareRequestBody(input: {
       declaredContentLength,
       requestContext: input.requestContext,
     });
-  }
-
-  if (input.request.body === null || declaredContentLength === 0) {
-    return withoutRawWebhookIntegrity(null, 0);
   }
 
   if (declaredContentLength !== null) {
