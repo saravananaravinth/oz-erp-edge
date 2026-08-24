@@ -20,6 +20,10 @@ export const ZEPTOMAIL_WEBHOOK_PATTERN = new RegExp(
   `^/erp/channel-ingest/webhooks/zeptomail/${WEBHOOK_ENDPOINT_KEY_PATTERN}$`,
   'u',
 );
+export const ZOHO_INVENTORY_WEBHOOK_PATTERN = new RegExp(
+  `^/erp/channel-ingest/webhooks/zoho-inventory/${WEBHOOK_ENDPOINT_KEY_PATTERN}$`,
+  'u',
+);
 
 /**
  * Provider webhook routes whose public API contract permits POST only.
@@ -32,6 +36,7 @@ export const POST_ONLY_RAW_WEBHOOK_PATTERNS = [
   META_WEBHOOK_PATTERN,
   MSG91_WEBHOOK_PATTERN,
   ZEPTOMAIL_WEBHOOK_PATTERN,
+  ZOHO_INVENTORY_WEBHOOK_PATTERN,
 ] as const;
 
 export const WARRANTY_UPLOAD_PATTERN = new RegExp(
