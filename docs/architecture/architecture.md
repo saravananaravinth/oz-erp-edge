@@ -1,3 +1,5 @@
+<!-- oz-erp-edge/docs/architecture/architecture.md -->
+
 # oz-erp-edge architecture
 
 ## Purpose

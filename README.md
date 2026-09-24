@@ -1,3 +1,5 @@
+<!-- oz-erp-edge/README.md -->
+
 # oz-erp-edge
 
 `oz-erp-edge` is the enterprise Cloudflare Workers gateway for the private `oz-erp-api` Cloud Run

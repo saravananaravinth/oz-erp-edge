@@ -1,3 +1,4 @@
+// oz-erp-edge/wrangler.jsonc
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "oz-erp-edge",

@@ -1,3 +1,5 @@
+<!-- oz-erp-edge/docs/architecture/deployment.md -->
+
 # Deployment architecture
 
 The GitHub Actions workflow orchestrates checked-in scripts rather than embedding release and

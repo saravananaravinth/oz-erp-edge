@@ -1,3 +1,5 @@
+<!-- oz-erp-edge/docs/architecture/security-boundaries.md -->
+
 # Security boundaries
 
 ## Origin enforcement

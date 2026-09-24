@@ -1,3 +1,5 @@
+<!-- oz-erp-edge/docs/architecture/route-contracts.md -->
+
 # Route contracts
 
 ## Edge endpoints
