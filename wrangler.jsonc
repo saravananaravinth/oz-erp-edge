@@ -11,7 +11,8 @@
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "observability": {
     "enabled": true,
-    "logs": { "enabled": true, "head_sampling_rate": 0.1, "invocation_logs": true },
+    "redact_query_string": true,
+    "logs": { "enabled": true, "head_sampling_rate": 0.1, "invocation_logs": false },
     "traces": { "enabled": true, "head_sampling_rate": 0.01 }
   },
   "secrets": { "required": ["GCP_SERVICE_ACCOUNT_JSON_B64"] },
@@ -25,8 +26,8 @@
     "ALLOWED_BACKEND_PREFIXES": "/erp",
     "BLOCKED_BACKEND_PREFIXES": "/tasks,/metrics,/readyz,/healthz,/livez,/version,/erp/metrics,/erp/readyz,/erp/healthz,/erp/livez,/erp/version",
     "ALLOWED_ORIGINS": "https://erp.ozotecev.com,https://www.ozotecev.com",
-    "ALLOWED_METHODS": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-    "ALLOWED_HEADERS": "authorization,content-type,idempotency-key,x-idempotency-key,x-request-id,x-correlation-id,x-tenant-id,x-org-unit-id,x-dealer-org-unit-id,x-financier-id,x-customer-id",
+    "ALLOWED_METHODS": "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
+    "ALLOWED_HEADERS": "authorization,content-type,idempotency-key,traceparent,x-idempotency-key,x-request-id,x-correlation-id,x-tenant-id,x-org-unit-id,x-dealer-org-unit-id,x-financier-id,x-customer-id",
     "EXPOSED_HEADERS": "x-request-id,x-correlation-id,retry-after,x-ratelimit-scope,x-ratelimit-limit,x-ratelimit-remaining",
     "CORS_MAX_AGE_SECONDS": "600",
     "CORS_ALLOW_CREDENTIALS": "false",

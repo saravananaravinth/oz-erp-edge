@@ -46,6 +46,9 @@ export async function checkBackendReadiness(input: {
   const headers = new Headers({ accept: 'application/json' });
   headers.set('x-request-id', input.requestContext.requestId);
   headers.set('x-correlation-id', input.requestContext.correlationId);
+  if (input.requestContext.traceparent !== null) {
+    headers.set('traceparent', input.requestContext.traceparent);
+  }
   headers.set('x-oz-edge-gateway', 'cloudflare-worker');
 
   if (shouldUseCloudRunIdToken(input.config)) {

@@ -159,14 +159,16 @@ const pathCsvList = (defaultValue: string) =>
     }
   });
 
-const methodCsvList = csvList('GET,POST,PUT,PATCH,DELETE,OPTIONS').superRefine((items, context) => {
-  const supported = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
-  for (const item of items) {
-    if (!supported.has(item)) {
-      context.addIssue({ code: 'custom', message: `Unsupported HTTP method "${item}".` });
+const methodCsvList = csvList('GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS').superRefine(
+  (items, context) => {
+    const supported = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+    for (const item of items) {
+      if (!supported.has(item)) {
+        context.addIssue({ code: 'custom', message: `Unsupported HTTP method "${item}".` });
+      }
     }
-  }
-});
+  },
+);
 
 const headerCsvList = (defaultValue: string) =>
   csvList(defaultValue).superRefine((items, context) => {
@@ -203,7 +205,7 @@ export const workerEnvSchema = z
     ALLOWED_ORIGINS: originCsvList,
     ALLOWED_METHODS: methodCsvList,
     ALLOWED_HEADERS: headerCsvList(
-      'authorization,content-type,idempotency-key,x-idempotency-key,x-request-id,x-correlation-id,x-tenant-id,x-org-unit-id,x-dealer-org-unit-id,x-financier-id,x-customer-id',
+      'authorization,content-type,idempotency-key,traceparent,x-idempotency-key,x-request-id,x-correlation-id,x-tenant-id,x-org-unit-id,x-dealer-org-unit-id,x-financier-id,x-customer-id',
     ),
     EXPOSED_HEADERS: headerCsvList(
       'x-request-id,x-correlation-id,retry-after,x-ratelimit-scope,x-ratelimit-limit,x-ratelimit-remaining',

@@ -28,18 +28,37 @@ function invalidFields(error: unknown): readonly string[] {
   ].sort();
 }
 
+function classifyOutcome(status: number): 'success' | 'redirect' | 'client_error' | 'server_error' {
+  if (status >= 500) return 'server_error';
+  if (status >= 400) return 'client_error';
+  if (status >= 300) return 'redirect';
+  return 'success';
+}
+
 function logCompleted(context: WorkerContext, startedAt: number, logger: EdgeLogger): void {
+  const requestContext = context.get('requestContext');
   const version = context.env.CF_VERSION_METADATA;
-  logger.info({
+  const status = context.res.status;
+  const record = {
     event: 'edge_request_completed',
+    request_id: requestContext.requestId,
+    correlation_id: requestContext.correlationId,
+    method: context.req.raw.method.toUpperCase(),
     route_class: context.get('routeClass') ?? 'EDGE',
-    status: context.res.status,
+    outcome: classifyOutcome(status),
+    status,
     duration_ms: Math.round((performance.now() - startedAt) * 100) / 100,
     backend_duration_ms: context.get('backendDurationMs') ?? null,
     colo: getCloudflareColo(context.req.raw),
     worker_version: version?.id ?? 'local',
     worker_tag: version?.tag ?? context.env.APP_VERSION ?? 'unknown',
-  });
+  } as const;
+
+  if (status >= 500) {
+    logger.error(record);
+  } else {
+    logger.info(record);
+  }
 }
 
 function logTokenFailure(context: WorkerContext, logger: EdgeLogger): void {
@@ -71,6 +90,7 @@ export function createRequestTelemetryMiddleware(
       logger.error({
         event: 'edge_config_invalid',
         request_id: requestContext.requestId,
+        correlation_id: requestContext.correlationId,
         invalid_fields: invalidFields(error),
       });
 
@@ -84,6 +104,7 @@ export function createRequestTelemetryMiddleware(
               ? 'The edge gateway environment is invalid.'
               : 'The edge gateway could not start safely.',
           requestId: requestContext.requestId,
+          correlationId: requestContext.correlationId,
         }),
         normalizeOrigin(context.req.header('origin')),
         context.env.ALLOWED_ORIGINS,

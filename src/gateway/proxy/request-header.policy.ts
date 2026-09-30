@@ -17,6 +17,8 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 const FORBIDDEN_INBOUND_HEADERS = new Set([
+  'b3',
+  'baggage',
   'cf-connecting-ip',
   'cf-ipcountry',
   'cf-ray',
@@ -26,6 +28,10 @@ const FORBIDDEN_INBOUND_HEADERS = new Set([
   'cookie',
   'forwarded',
   'host',
+  'traceparent',
+  'tracestate',
+  'uber-trace-id',
+  'x-cloud-trace-context',
   'x-goog-authenticated-user-email',
   'x-goog-authenticated-user-id',
   RAW_WEBHOOK_BODY_SHA256_HEADER,
@@ -44,6 +50,7 @@ export function isForbiddenInboundHeader(name: string): boolean {
     HOP_BY_HOP_HEADERS.has(normalized) ||
     FORBIDDEN_INBOUND_HEADERS.has(normalized) ||
     normalized.startsWith('cf-') ||
+    normalized.startsWith('x-b3-') ||
     normalized.startsWith('x-cloudtasks-') ||
     normalized.startsWith('x-goog-') ||
     normalized.startsWith('x-appengine-') ||
@@ -81,6 +88,9 @@ export function buildBackendHeaders(input: {
 
   headers.set('x-request-id', input.requestContext.requestId);
   headers.set('x-correlation-id', input.requestContext.correlationId);
+  if (input.requestContext.traceparent !== null) {
+    headers.set('traceparent', input.requestContext.traceparent);
+  }
   headers.set(
     'x-forwarded-proto',
     new URL(input.request.url).protocol === 'http:' ? 'http' : 'https',

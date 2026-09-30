@@ -45,6 +45,114 @@ function fail(message) {
   process.exitCode = 1;
 }
 
+function parseJsonc(source) {
+  let withoutComments = '';
+  let inString = false;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const current = source[index];
+    const next = source[index + 1];
+
+    if (lineComment) {
+      if (current === '\n') {
+        lineComment = false;
+        withoutComments += current;
+      }
+      continue;
+    }
+
+    if (blockComment) {
+      if (current === '*' && next === '/') {
+        blockComment = false;
+        index += 1;
+      } else if (current === '\n') {
+        withoutComments += '\n';
+      }
+      continue;
+    }
+
+    if (inString) {
+      withoutComments += current;
+      if (escaped) {
+        escaped = false;
+      } else if (current === '\\') {
+        escaped = true;
+      } else if (current === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (current === '"') {
+      inString = true;
+      withoutComments += current;
+      continue;
+    }
+
+    if (current === '/' && next === '/') {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+
+    if (current === '/' && next === '*') {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+
+    withoutComments += current;
+  }
+
+  let normalized = '';
+  inString = false;
+  escaped = false;
+
+  for (let index = 0; index < withoutComments.length; index += 1) {
+    const current = withoutComments[index];
+
+    if (inString) {
+      normalized += current;
+      if (escaped) {
+        escaped = false;
+      } else if (current === '\\') {
+        escaped = true;
+      } else if (current === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (current === '"') {
+      inString = true;
+      normalized += current;
+      continue;
+    }
+
+    if (current === ',') {
+      let lookahead = index + 1;
+      while (/\s/u.test(withoutComments[lookahead] ?? '')) lookahead += 1;
+      if (withoutComments[lookahead] === '}' || withoutComments[lookahead] === ']') continue;
+    }
+
+    normalized += current;
+  }
+
+  return JSON.parse(normalized);
+}
+
+function csvSet(value) {
+  return new Set(
+    String(value ?? '')
+      .split(',')
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
 for (const file of requiredFiles) {
   if (!fs.existsSync(path.join(root, file))) fail(`missing canonical file ${file}`);
 }
@@ -100,11 +208,42 @@ for (const file of files) {
   }
 }
 
-const wrangler = fs.readFileSync(path.join(root, 'wrangler.jsonc'), 'utf8');
-if (!wrangler.includes('"main": "src/apps/worker/worker.entrypoint.ts"')) {
+const wranglerSource = fs.readFileSync(path.join(root, 'wrangler.jsonc'), 'utf8');
+const wrangler = parseJsonc(wranglerSource);
+if (wrangler.main !== 'src/apps/worker/worker.entrypoint.ts') {
   fail('wrangler.jsonc must use the canonical Worker entrypoint');
 }
 
+const observability = wrangler.observability;
+if (observability?.enabled !== true) fail('Worker observability must remain enabled');
+if (observability?.redact_query_string !== true) {
+  fail('Worker observability must redact query strings');
+}
+if (observability?.logs?.enabled !== true) fail('Workers Logs must remain enabled');
+if (observability?.logs?.invocation_logs !== false) {
+  fail('production invocation logs must remain disabled');
+}
+if (observability?.logs?.head_sampling_rate !== 0.1) {
+  fail('Workers Logs head sampling rate must remain 0.1');
+}
+if (observability?.traces?.enabled !== true) fail('Workers traces must remain enabled');
+if (observability?.traces?.head_sampling_rate !== 0.01) {
+  fail('Workers trace head sampling rate must remain 0.01');
+}
+if (observability?.propagation_policy === 'accept') {
+  fail('unauthenticated inbound trace propagation must not be globally accepted');
+}
+
+const allowedMethods = csvSet(wrangler.vars?.ALLOWED_METHODS);
+for (const method of ['get', 'head', 'post', 'put', 'patch', 'delete', 'options']) {
+  if (!allowedMethods.has(method)) fail(`ALLOWED_METHODS is missing ${method.toUpperCase()}`);
+}
+
+const allowedHeaders = csvSet(wrangler.vars?.ALLOWED_HEADERS);
+for (const header of ['authorization', 'content-type', 'idempotency-key', 'traceparent']) {
+  if (!allowedHeaders.has(header)) fail(`ALLOWED_HEADERS is missing ${header}`);
+}
+
 if (process.exitCode === undefined) {
-  console.log('Architecture boundaries, canonical paths, naming, and file-size checks passed.');
+  console.log('Architecture, routing, and observability policy checks passed.');
 }
