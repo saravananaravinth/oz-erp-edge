@@ -49,6 +49,7 @@ function logCompleted(context: WorkerContext, startedAt: number, logger: EdgeLog
     status,
     duration_ms: Math.round((performance.now() - startedAt) * 100) / 100,
     backend_duration_ms: context.get('backendDurationMs') ?? null,
+    cache_status: context.get('cacheStatus') ?? 'BYPASS',
     colo: getCloudflareColo(context.req.raw),
     worker_version: version?.id ?? 'local',
     worker_tag: version?.tag ?? context.env.APP_VERSION ?? 'unknown',

@@ -11,6 +11,7 @@ export type WorkerVariables = {
   routeClass?: string;
   backendDurationMs?: number;
   tokenFailure?: CloudRunTokenFailure;
+  cacheStatus?: 'HIT' | 'MISS' | 'BYPASS' | 'ERROR';
 };
 
 export type WorkerHonoEnv = {

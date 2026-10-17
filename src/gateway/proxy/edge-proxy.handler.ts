@@ -14,6 +14,11 @@ import { resolveBackendPath } from '../routing/route-exposure.policy.js';
 import { buildBackendRequest } from './backend-request.builder.js';
 import { sanitizeBackendResponse } from './backend-response.sanitizer.js';
 import { prepareRequestBody } from './bounded-request-body.reader.js';
+import {
+  makePublicJwksResponseUncacheable,
+  readCachedPublicJwks,
+  schedulePublicJwksCacheWrite,
+} from './public-jwks-cache.js';
 
 export type EdgeProxyDependencies = Readonly<{
   fetcher: OutboundFetcher;
@@ -77,6 +82,8 @@ export function createEdgeProxyHandler(dependencies: EdgeProxyDependencies) {
 
     const routeClass = classifyBackendRoute(method, backendPath);
     context.set('routeClass', routeClass);
+    const cachedJwks = await readCachedPublicJwks(request, backendPath, context);
+    if (cachedJwks !== null) return cachedJwks;
     const bodyResult = await prepareRequestBody({ request, routeClass, config, requestContext });
     if (bodyResult instanceof Response) return bodyResult;
 
@@ -114,7 +121,11 @@ export function createEdgeProxyHandler(dependencies: EdgeProxyDependencies) {
         'backendDurationMs',
         Math.round((performance.now() - backendStartedAt) * 100) / 100,
       );
-      return sanitizeBackendResponse(backendResponse, requestContext);
+      schedulePublicJwksCacheWrite(request, backendPath, backendResponse, context);
+      return makePublicJwksResponseUncacheable(
+        sanitizeBackendResponse(backendResponse, requestContext),
+        backendPath,
+      );
     } catch (error: unknown) {
       context.set(
         'backendDurationMs',
