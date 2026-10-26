@@ -1,4 +1,5 @@
 <!-- oz-erp-edge/AGENTS.md -->
+
 # Ozotec ERP — Project Rules
 
 Applies to `oz-erp-api`, `oz-erp-edge`, `oz-next-app`. These are distinct Git repositories and may
