@@ -9,5 +9,12 @@
     "sourceMap": false
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
-  "exclude": ["src/worker-configuration.d.ts", "node_modules", "dist", "coverage", ".wrangler"]
+  "exclude": [
+    "src/worker-configuration.d.ts",
+    "src/apps/worker/worker.entrypoint.ts",
+    "node_modules",
+    "dist",
+    "coverage",
+    ".wrangler"
+  ]
 }
