@@ -24,7 +24,9 @@ export async function fetchDealerLocatorBridge(
   if (
     request.method !== 'POST' ||
     url.search ||
-    !/^\/internal\/dealer-locator\/(health|context|capture|submission)$/u.test(url.pathname) ||
+    !/^\/internal\/dealer-locator\/(health|context|capture|submission|link-health|link-context|link-location|link-submission)$/u.test(
+      url.pathname,
+    ) ||
     !env.DEALER_LOCATOR_BRIDGE_KEY ||
     !/^[a-f0-9]{64}$/u.test(env.DEALER_LOCATOR_BRIDGE_KEY)
   )
