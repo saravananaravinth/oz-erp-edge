@@ -926,16 +926,55 @@ jobs:
       - name: Upload candidate Worker version
         id: upload
         shell: bash
+        env:
+          DESTINATION_INVOKER_KEY_B64: ${{ secrets.GCP_OLD_ERP_515611_INVOKER_JSON_B64 }}
         run: |
           set -euo pipefail
+          umask 077
 
           upload_log="$(mktemp)"
           wrangler_output_file="$(mktemp)"
-          trap 'rm -f "${upload_log}" "${wrangler_output_file}"' EXIT
+          candidate_secrets_file="$(mktemp)"
+          trap 'rm -f "${upload_log}" "${wrangler_output_file}" "${candidate_secrets_file}"' EXIT
+
+          CANDIDATE_SECRETS_FILE="${candidate_secrets_file}" node --input-type=module <<'NODE'
+          import { createPrivateKey } from 'node:crypto';
+          import fs from 'node:fs';
+
+          const release = JSON.parse(fs.readFileSync(process.env.WRANGLER_RELEASE_CONFIG, 'utf8'));
+          const destination = 'https://oz-erp-api-563990989442.asia-south1.run.app';
+          if (release.vars.CLOUD_RUN_BASE_URL !== destination || release.vars.CLOUD_RUN_AUDIENCE !== destination) {
+            throw new Error('The release origin and audience must identify the destination Cloud Run service.');
+          }
+
+          const encoded = process.env.DESTINATION_INVOKER_KEY_B64;
+          try {
+            const serviceAccount = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+            if (
+              serviceAccount.type !== 'service_account' ||
+              serviceAccount.project_id !== 'old-erp-515611' ||
+              serviceAccount.client_email !== 'oz-erp-edge-invoker@old-erp-515611.iam.gserviceaccount.com' ||
+              serviceAccount.token_uri !== 'https://oauth2.googleapis.com/token' ||
+              createPrivateKey(serviceAccount.private_key).asymmetricKeyType !== 'rsa'
+            ) {
+              throw new Error();
+            }
+          } catch {
+            throw new Error('The destination invoker credential is missing or invalid.');
+          }
+
+          fs.writeFileSync(
+            process.env.CANDIDATE_SECRETS_FILE,
+            JSON.stringify({ GCP_SERVICE_ACCOUNT_JSON_B64: encoded }),
+            { mode: 0o600 },
+          );
+          NODE
+          unset DESTINATION_INVOKER_KEY_B64
 
           WRANGLER_OUTPUT_FILE_PATH="${wrangler_output_file}" \
             npx wrangler versions upload \
               --config "${WRANGLER_RELEASE_CONFIG}" \
+              --secrets-file "${candidate_secrets_file}" \
               --tag "${WORKER_VERSION_TAG}" \
               --message "oz-erp-edge ${APP_VERSION} from ${GITHUB_SHA}" \
               --strict \
@@ -1010,6 +1049,40 @@ jobs:
           );
           NODE
 
+      - name: Verify the staged origin and credential binding
+        shell: bash
+        env:
+          CANDIDATE_VERSION_ID: ${{ steps.upload.outputs.candidate_version_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          version_file="$(mktemp)"
+          trap 'rm -f "${version_file}"' EXIT
+          npx wrangler versions view "${CANDIDATE_VERSION_ID}" \
+            --config "${WRANGLER_RELEASE_CONFIG}" --json > "${version_file}"
+
+          VERSION_FILE="${version_file}" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const version = JSON.parse(fs.readFileSync(process.env.VERSION_FILE, 'utf8'));
+          const release = JSON.parse(fs.readFileSync(process.env.WRANGLER_RELEASE_CONFIG, 'utf8'));
+          const bindings = version.resources?.bindings;
+          if (version.id !== process.env.CANDIDATE_VERSION_ID || !Array.isArray(bindings)) {
+            throw new Error('Cloudflare did not return the uploaded candidate version.');
+          }
+
+          for (const name of ['CLOUD_RUN_BASE_URL', 'CLOUD_RUN_AUDIENCE', 'CLOUD_RUN_AUTH_MODE']) {
+            const binding = bindings.find((entry) => entry.name === name);
+            if (binding?.type !== 'plain_text' || binding.text !== release.vars[name]) {
+              throw new Error('The candidate has an unexpected ' + name + ' binding.');
+            }
+          }
+          if (!bindings.some((entry) => entry.name === 'GCP_SERVICE_ACCOUNT_JSON_B64' && entry.type === 'secret_text')) {
+            throw new Error('The candidate is missing the Cloud Run invoker secret binding.');
+          }
+          NODE
+
       - name: Canary and promote candidate
         id: rollout
         shell: bash
@@ -1038,11 +1111,20 @@ jobs:
             if [[ "${rollout_started}" == "true" && "${rollback_attempted}" == "false" ]]; then
               rollback_attempted=true
               trap - ERR
+              if ! assert_distribution; then
+                echo "::error title=Rollback state unavailable::Review the live deployment before restoring ${PREVIOUS_VERSION_ID}."
+                exit "${exit_code}"
+              fi
+              if assert_distribution 0 100; then
+                echo "::notice::The previous Worker version already serves all traffic."
+                exit "${exit_code}"
+              fi
               echo "::warning title=Rolling back Worker::Restoring previous Worker version ${PREVIOUS_VERSION_ID}."
 
               if npx wrangler rollback "${PREVIOUS_VERSION_ID}" \
                 --config "${WRANGLER_RELEASE_CONFIG}" \
-                --message "Automatic rollback after failed deployment ${GITHUB_RUN_ID}"; then
+                --message "Automatic rollback after failed deployment ${GITHUB_RUN_ID}" \
+                && assert_distribution 0 100; then
                 verify_public_health_without_version || true
               else
                 echo "::error title=Automatic rollback failed::Manual Cloudflare rollback to ${PREVIOUS_VERSION_ID} is required immediately."
@@ -1063,16 +1145,20 @@ jobs:
           }
 
           assert_distribution() {
-            local expected_candidate="$1"
-            local expected_previous="$2"
+            local expected_candidate="${1:-}"
+            local expected_previous="${2:-}"
             local status_file
+            local validation_status=0
             status_file="$(mktemp)"
-            get_distribution "${status_file}"
+            if ! get_distribution "${status_file}"; then
+              rm -f "${status_file}"
+              return 1
+            fi
 
             STATUS_FILE="${status_file}" \
             EXPECTED_CANDIDATE="${expected_candidate}" \
             EXPECTED_PREVIOUS="${expected_previous}" \
-            node --input-type=module <<'NODE'
+            node --input-type=module <<'NODE' || validation_status=$?
           import fs from 'node:fs';
 
           const data = JSON.parse(fs.readFileSync(process.env.STATUS_FILE, 'utf8'));
@@ -1111,15 +1197,24 @@ jobs:
           walk(data);
           const candidate = percentages.get(process.env.CANDIDATE_VERSION_ID) ?? 0;
           const previous = percentages.get(process.env.PREVIOUS_VERSION_ID) ?? 0;
-          const expectedCandidate = Number(process.env.EXPECTED_CANDIDATE);
-          const expectedPrevious = Number(process.env.EXPECTED_PREVIOUS);
+          const unexpected = [...percentages].some(([id, percentage]) =>
+            percentage > 0.01 && id !== process.env.CANDIDATE_VERSION_ID && id !== process.env.PREVIOUS_VERSION_ID
+          );
+          if (unexpected || Math.abs(candidate + previous - 100) > 0.01) {
+            throw new Error('The live deployment is outside the captured rollback scope.');
+          }
 
-          if (Math.abs(candidate - expectedCandidate) > 0.01 || Math.abs(previous - expectedPrevious) > 0.01) {
-            throw new Error(`Unexpected deployment distribution: candidate=${candidate}, previous=${previous}.`);
+          if (process.env.EXPECTED_CANDIDATE !== '') {
+            const expectedCandidate = Number(process.env.EXPECTED_CANDIDATE);
+            const expectedPrevious = Number(process.env.EXPECTED_PREVIOUS);
+            if (Math.abs(candidate - expectedCandidate) > 0.01 || Math.abs(previous - expectedPrevious) > 0.01) {
+              throw new Error('Unexpected deployment distribution: candidate=' + candidate + ', previous=' + previous + '.');
+            }
           }
           NODE
 
             rm -f "${status_file}"
+            return "${validation_status}"
           }
 
           parse_livez() {
@@ -1298,6 +1393,7 @@ jobs:
             local previous_percentage="$2"
             local label="$3"
 
+            rollout_started=true
             npx wrangler versions deploy \
               "${CANDIDATE_VERSION_ID}@${candidate_percentage}%" \
               "${PREVIOUS_VERSION_ID}@${previous_percentage}%" \
@@ -1305,12 +1401,27 @@ jobs:
               --message "${label}: ${WORKER_VERSION_TAG} from ${SHORT_SHA}" \
               --yes
 
-            rollout_started=true
             assert_distribution "${candidate_percentage}" "${previous_percentage}"
           }
 
+          verify_candidate_denial() {
+            local path="$1"
+            local expected_status="$2"
+            local status
+            status="$(curl --silent --show-error --max-time 20 \
+              --header "Cloudflare-Workers-Version-Overrides: ${WORKER_NAME}=\"${CANDIDATE_VERSION_ID}\"" \
+              --output /dev/null --write-out '%{http_code}' "${WORKER_ORIGIN}${path}")"
+            if [[ "${status}" != "${expected_status}" ]]; then
+              echo "::error title=Candidate route protection check failed::${path} returned ${status} instead of ${expected_status}."
+              return 1
+            fi
+          }
+
+          assert_distribution 0 100
           deploy_distribution 0 100 "Pre-production smoke"
           node scripts/verify-candidate-smoke.mjs
+          verify_candidate_denial '/erp/auth/me' 401
+          verify_candidate_denial '/tasks' 404
 
           deploy_distribution 5 95 "Canary 5 percent"
           sleep "${CANARY_DWELL_SECONDS}"
