@@ -34,7 +34,7 @@
     "REQUIRE_ORIGIN_ON_MUTATION": "true",
     "MAX_BODY_BYTES": "1048576",
     "FETCH_TIMEOUT_MS": "115000",
-    "READINESS_TIMEOUT_MS": "5000",
+    "READINESS_TIMEOUT_MS": "15000",
     "CLOUD_RUN_BASE_URL": "https://oz-erp-api-563990989442.asia-south1.run.app",
     "CLOUD_RUN_AUDIENCE": "https://oz-erp-api-563990989442.asia-south1.run.app",
     "CLOUD_RUN_AUTH_MODE": "id_token",

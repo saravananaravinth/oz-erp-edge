@@ -215,7 +215,7 @@ export const workerEnvSchema = z
     REQUIRE_ORIGIN_ON_MUTATION: booleanFromEnv(true),
     MAX_BODY_BYTES: integerFromEnv({ min: 1_024, max: 10_485_760, defaultValue: 1_048_576 }),
     FETCH_TIMEOUT_MS: integerFromEnv({ min: 1_000, max: 120_000, defaultValue: 115_000 }),
-    READINESS_TIMEOUT_MS: integerFromEnv({ min: 500, max: 10_000, defaultValue: 5_000 }),
+    READINESS_TIMEOUT_MS: integerFromEnv({ min: 500, max: 15_000, defaultValue: 5_000 }),
     CLOUD_RUN_BASE_URL: exactHttpOriginString,
     CLOUD_RUN_AUDIENCE: exactHttpOriginString,
     CLOUD_RUN_AUTH_MODE: cloudRunAuthModeSchema,
